@@ -1,0 +1,23 @@
+{
+  "ec2": {
+    "t2.micro": 0.0124,
+    "t3.micro": 0.0112,
+    "t3.small": 0.0224
+  },
+  "lambda": {
+    "per_1ms_128mb": 0.0000000021,
+    "per_1ms_512mb": 0.0000000083,
+    "per_1M_requests": 0.20
+  },
+  "s3": {
+    "standard_per_gb_month": 0.025
+  },
+  "rds": {
+    "db.t2.micro": 0.019,
+    "db.t3.micro": 0.019
+  },
+  "ebs": {
+    "gp2_per_gb_month": 0.114,
+    "gp3_per_gb_month": 0.0912
+  }
+}

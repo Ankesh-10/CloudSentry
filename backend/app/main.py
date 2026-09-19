@@ -8,14 +8,20 @@ from backend.app.api import dashboard, resources, metrics, anomalies, actions, s
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+from backend.app.db.asyncpg_pool import init_db_pool, close_db_pool
+from backend.app.scheduler import setup_scheduler, scheduler
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting CloudSentry API...")
+    await init_db_pool()
     # Initialize scheduler
-    # scheduler.start()
+    setup_scheduler()
+    scheduler.start()
     yield
     logger.info("Shutting down CloudSentry API...")
-    # scheduler.shutdown()
+    scheduler.shutdown()
+    await close_db_pool()
 
 app = FastAPI(
     title="CloudSentry API",
@@ -24,8 +30,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# app.include_router(resources.router, prefix="/api/v1/resources", tags=["resources"])
-# app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
+app.include_router(resources.router, prefix="/api/v1/resources", tags=["resources"])
+app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
 # app.include_router(anomalies.router, prefix="/api/v1/anomalies", tags=["anomalies"])
 # app.include_router(actions.router, prefix="/api/v1/actions", tags=["actions"])
 # app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["dashboard"])
