@@ -5,6 +5,7 @@ from backend.app.services.telemetry import TelemetryService
 from backend.app.services.cost_estimator import CostEstimationService
 from backend.app.services.anomaly_detector import AnomalyDetectorService
 from backend.app.services.optimizer import OptimizerService
+from backend.app.services.ml_retrainer import MLRetrainingService
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,7 @@ telemetry_service = TelemetryService()
 cost_estimation_service = CostEstimationService()
 anomaly_detector_service = AnomalyDetectorService()
 optimizer_service = OptimizerService()
+ml_retraining_service = MLRetrainingService()
 
 def setup_scheduler():
     """Registers all periodic jobs."""
@@ -71,6 +73,16 @@ def setup_scheduler():
         misfire_grace_time=60
     )
     
-    # ML training and Action verification jobs will be added here later
+    # ML Retraining Job (Every Sunday at 2:00 AM)
+    scheduler.add_job(
+        ml_retraining_service.run,
+        'cron',
+        day_of_week='sun',
+        hour=2,
+        minute=0,
+        id='ml_retraining_job',
+        replace_existing=True,
+        misfire_grace_time=3600
+    )
     
     logger.info("APScheduler jobs configured.")
