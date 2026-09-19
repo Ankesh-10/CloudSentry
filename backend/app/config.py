@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = ""
     SUPABASE_ANON_KEY: str = ""
     SUPABASE_SERVICE_ROLE_KEY: str = ""
+    DATABASE_URL: str = ""
 
     # AWS
     AWS_ACCESS_KEY_ID: str = ""
