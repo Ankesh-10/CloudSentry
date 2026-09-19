@@ -1,12 +1,13 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from typing import List
 from backend.app.schemas.models import Action
 from backend.app.db.supabase_client import get_supabase_client
 from backend.app.services.action_runner import ActionRunner
+from backend.app.auth import get_current_user
 from pydantic import BaseModel
 from datetime import datetime, timezone
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_user)])
 db = get_supabase_client()
 runner = ActionRunner()
 
