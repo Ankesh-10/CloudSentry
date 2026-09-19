@@ -1,0 +1,17 @@
+{
+  "scenario_name": "idle_ec2",
+  "resource_type": "ec2",
+  "total_points": 2100,
+  "baseline": {
+    "CPUUtilization": {"mean": 45.0, "std": 0.5},
+    "NetworkIn": {"mean": 500000, "std": 5000},
+    "NetworkOut": {"mean": 100000, "std": 1000}
+  },
+  "anomaly": {
+    "start_point": 2000,
+    "duration": 100,
+    "CPUUtilization": {"mean": 1.0, "std": 0.5},
+    "NetworkIn": {"mean": 500, "std": 100},
+    "NetworkOut": {"mean": 100, "std": 20}
+  }
+}

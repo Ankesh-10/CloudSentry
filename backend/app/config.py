@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     # Backend
     BACKEND_PORT: int = 8000
     LOG_LEVEL: str = "INFO"
-    ML_ANOMALY_THRESHOLD: float = -0.3
+    ML_ANOMALY_THRESHOLD: float = -0.60
 
     # Safety
     GLOBAL_AUTOMATION_ENABLED: bool = False

@@ -52,7 +52,7 @@ def build_feature_vector(df: pd.DataFrame, resource_type: str) -> pd.DataFrame:
         avg_24_inv = rolling_inv_24h.iloc[-1]
         
         features['invocation_spike_ratio'] = invocations.iloc[-1] / avg_24_inv if avg_24_inv > 0 else 0.0
-        features['error_rate'] = errors.iloc[-1] / invocations.iloc[-1] if invocations.iloc[-1] > 0 else 0.0
+        features['error_rate'] = errors.iloc[-1] / (invocations.iloc[-1] + 1.0)
         
     # Standardize output structure for IF model compatibility across resources
     expected_cols = [
@@ -110,7 +110,7 @@ def build_training_dataset(df: pd.DataFrame, resource_type: str) -> pd.DataFrame
         safe_avg_24_inv = rolling_inv_24h.replace(0, np.nan)
         
         features['invocation_spike_ratio'] = (invocations / safe_avg_24_inv).fillna(0.0)
-        safe_invocations = invocations.replace(0, np.nan)
+        safe_invocations = invocations + 1.0
         features['error_rate'] = (errors / safe_invocations).fillna(0.0)
         
     expected_cols = [

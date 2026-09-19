@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.scheduler import scheduler
 from backend.app.api import dashboard, resources, metrics, anomalies, actions, system, audit
@@ -28,6 +29,15 @@ app = FastAPI(
     version="1.0.0",
     description="Autonomous cloud cost intelligence API",
     lifespan=lifespan
+)
+
+# Add CORS Middleware so the React frontend can make requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, change to specific frontend domains
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(resources.router, prefix="/api/v1/resources", tags=["resources"])

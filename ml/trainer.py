@@ -25,7 +25,7 @@ class ModelTrainer:
         # We assume features_df is already engineered by features.py and contains only numeric feature columns
         model = IsolationForest(
             n_estimators=100,
-            contamination='auto',
+            contamination=0.001,
             random_state=42,
             n_jobs=-1
         )

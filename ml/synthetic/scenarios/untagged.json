@@ -1,0 +1,10 @@
+{
+  "scenario_name": "untagged",
+  "resource_type": "s3",
+  "total_points": 200,
+  "baseline": {
+    "BucketSizeBytes": {"mean": 1000000000, "std": 5000000},
+    "NumberOfObjects": {"mean": 1000, "std": 10}
+  },
+  "anomaly": null
+}

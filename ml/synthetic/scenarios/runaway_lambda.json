@@ -1,0 +1,17 @@
+{
+  "scenario_name": "runaway_lambda",
+  "resource_type": "lambda",
+  "total_points": 2100,
+  "baseline": {
+    "Invocations": {"mean": 120, "std": 5},
+    "Errors": {"mean": 1, "std": 0.2},
+    "Duration": {"mean": 200, "std": 10}
+  },
+  "anomaly": {
+    "start_point": 2000,
+    "duration": 100,
+    "Invocations": {"mean": 8500, "std": 500},
+    "Errors": {"mean": 20, "std": 5},
+    "Duration": {"mean": 2100, "std": 200}
+  }
+}

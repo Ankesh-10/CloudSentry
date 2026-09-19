@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: cloudsentry-backend
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    plan: starter
+    region: ohio
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: CLOUD_PROVIDER
+        value: "aws"
+      - key: GLOBAL_AUTOMATION_ENABLED
+        value: "false"
+      - key: DRY_RUN_MODE
+        value: "true"
