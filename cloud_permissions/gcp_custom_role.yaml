@@ -1,0 +1,16 @@
+title: "CloudSentry Agent Role"
+description: "Least-privilege role for the CloudSentry backend to monitor and optimize GCP resources."
+stage: "GA"
+includedPermissions:
+  # Resource Discovery
+  - compute.instances.list
+  - compute.instances.get
+  - compute.disks.list
+  
+  # Telemetry Collection (Stackdriver / Cloud Monitoring)
+  - monitoring.timeSeries.list
+  
+  # Safe Remediation Actions
+  - compute.instances.start
+  - compute.instances.stop
+  - compute.instances.setLabels
