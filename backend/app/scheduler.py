@@ -4,6 +4,7 @@ from backend.app.services.discovery import DiscoveryService
 from backend.app.services.telemetry import TelemetryService
 from backend.app.services.cost_estimator import CostEstimationService
 from backend.app.services.anomaly_detector import AnomalyDetectorService
+from backend.app.services.optimizer import OptimizerService
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ discovery_service = DiscoveryService()
 telemetry_service = TelemetryService()
 cost_estimation_service = CostEstimationService()
 anomaly_detector_service = AnomalyDetectorService()
+optimizer_service = OptimizerService()
 
 def setup_scheduler():
     """Registers all periodic jobs."""
@@ -45,6 +47,16 @@ def setup_scheduler():
         'interval',
         minutes=10,
         id='anomaly_detection_job',
+        replace_existing=True,
+        misfire_grace_time=60
+    )
+    
+    # Optimizer service (every 10 minutes)
+    scheduler.add_job(
+        optimizer_service.run,
+        'interval',
+        minutes=10,
+        id='optimizer_job',
         replace_existing=True,
         misfire_grace_time=60
     )
