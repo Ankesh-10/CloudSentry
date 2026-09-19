@@ -32,7 +32,7 @@ app = FastAPI(
 
 app.include_router(resources.router, prefix="/api/v1/resources", tags=["resources"])
 app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"])
-# app.include_router(anomalies.router, prefix="/api/v1/anomalies", tags=["anomalies"])
+app.include_router(anomalies.router, prefix="/api/v1/anomalies", tags=["anomalies"])
 # app.include_router(actions.router, prefix="/api/v1/actions", tags=["actions"])
 # app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["dashboard"])
 # app.include_router(system.router, prefix="/api/v1/system", tags=["system"])

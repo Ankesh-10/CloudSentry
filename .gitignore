@@ -164,6 +164,7 @@ cython_debug/
 # CloudSentry specific ignores
 models/*.pkl
 *.pkl
+md/
 
 # Node
 node_modules/

@@ -3,6 +3,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from backend.app.services.discovery import DiscoveryService
 from backend.app.services.telemetry import TelemetryService
 from backend.app.services.cost_estimator import CostEstimationService
+from backend.app.services.anomaly_detector import AnomalyDetectorService
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +13,7 @@ scheduler = AsyncIOScheduler()
 discovery_service = DiscoveryService()
 telemetry_service = TelemetryService()
 cost_estimation_service = CostEstimationService()
+anomaly_detector_service = AnomalyDetectorService()
 
 def setup_scheduler():
     """Registers all periodic jobs."""
@@ -37,6 +39,16 @@ def setup_scheduler():
         misfire_grace_time=60
     )
     
+    # Anomaly detection (every 10 minutes)
+    scheduler.add_job(
+        anomaly_detector_service.run,
+        'interval',
+        minutes=10,
+        id='anomaly_detection_job',
+        replace_existing=True,
+        misfire_grace_time=60
+    )
+    
     # Cost estimation update (every hour)
     scheduler.add_job(
         cost_estimation_service.run,
@@ -47,6 +59,6 @@ def setup_scheduler():
         misfire_grace_time=60
     )
     
-    # ML and Action verification jobs will be added here later
+    # ML training and Action verification jobs will be added here later
     
     logger.info("APScheduler jobs configured.")
