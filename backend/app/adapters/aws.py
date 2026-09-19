@@ -127,6 +127,14 @@ class AWSAdapter(CloudAdapter):
             logger.error(f"Failed to limit concurrency for {function_name}: {e}")
             return False
             
+    def remove_function_concurrency(self, function_name: str) -> bool:
+        try:
+            self.lambda_client.delete_function_concurrency(FunctionName=function_name)
+            return True
+        except (ClientError, BotoCoreError) as e:
+            logger.error(f"Failed to remove concurrency for {function_name}: {e}")
+            return False
+
     def apply_tags(self, resource_id: str, tags: Dict[str, str], resource_type: str) -> bool:
         try:
             if resource_type in ('ec2', 'ebs'):

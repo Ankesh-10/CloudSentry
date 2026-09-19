@@ -44,5 +44,9 @@ class CloudAdapter(ABC):
         pass
         
     @abstractmethod
+    def remove_function_concurrency(self, function_name: str) -> bool:
+        pass
+        
+    @abstractmethod
     def apply_tags(self, resource_id: str, tags: Dict[str, str], resource_type: str) -> bool:
         pass
