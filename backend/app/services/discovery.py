@@ -1,14 +1,14 @@
 import logging
 from typing import List, Dict, Any
 from datetime import datetime, timezone
-from backend.app.adapters.aws import AWSAdapter
+from backend.app.adapters.factory import get_cloud_adapter
 from backend.app.db.supabase_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
 
 class DiscoveryService:
     def __init__(self):
-        self.cloud_adapter = AWSAdapter()
+        self.cloud_adapter = get_cloud_adapter()
         self.db = get_supabase_client()
         
     def _get_or_create_account(self) -> str:

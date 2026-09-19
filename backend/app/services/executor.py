@@ -2,14 +2,14 @@ import logging
 from datetime import datetime, timezone
 from backend.app.db.supabase_client import get_supabase_client
 from backend.app.config import settings
-from backend.app.adapters.aws import AWSAdapter
+from backend.app.adapters.factory import get_cloud_adapter
 
 logger = logging.getLogger(__name__)
 
 class ExecutorService:
     def __init__(self):
         self.db = get_supabase_client()
-        self.cloud = AWSAdapter()
+        self.cloud = get_cloud_adapter()
         
     def execute_action(self, action_id: str) -> bool:
         """

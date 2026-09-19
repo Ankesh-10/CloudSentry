@@ -12,6 +12,13 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: str = ""
     AWS_DEFAULT_REGION: str = "us-east-1"
 
+    # Multi-Cloud
+    CLOUD_PROVIDER: str = "aws"  # 'aws' or 'gcp'
+    
+    # GCP
+    GCP_PROJECT_ID: str = ""
+    GOOGLE_APPLICATION_CREDENTIALS: str = ""
+
     # Backend
     BACKEND_PORT: int = 8000
     LOG_LEVEL: str = "INFO"
