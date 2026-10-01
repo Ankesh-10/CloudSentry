@@ -2,52 +2,142 @@
     "Version": "2012-10-17",
     "Statement": [
         {
-            "Sid": "AllowResourceDiscovery",
+            "Sid": "DiscoveryRegional",
             "Effect": "Allow",
             "Action": [
                 "ec2:DescribeInstances",
                 "ec2:DescribeVolumes",
                 "lambda:ListFunctions",
-                "lambda:GetFunction",
-                "lambda:GetFunctionConcurrency",
                 "lambda:ListTags",
-                "s3:ListAllMyBuckets",
-                "s3:GetBucketLocation",
-                "s3:GetBucketTagging",
+                "lambda:GetFunctionConcurrency",
                 "rds:DescribeDBInstances",
-                "rds:ListTagsForResource"
+                "cloudwatch:GetMetricData"
             ],
-            "Resource": "*"
+            "Resource": "*",
+            "Condition": {
+                "StringEquals": {"aws:RequestedRegion": "us-east-1"}
+            }
         },
         {
-            "Sid": "AllowTelemetryCollection",
+            "Sid": "DiscoveryS3Global",
             "Effect": "Allow",
             "Action": [
-                "cloudwatch:GetMetricData",
-                "cloudwatch:ListMetrics"
+                "s3:ListAllMyBuckets",
+                "s3:GetBucketLocation",
+                "s3:GetBucketTagging"
             ],
             "Resource": "*"
         },
         {
-            "Sid": "AllowSafeRemediationActions",
+            "Sid": "RemediateEc2InRegion",
             "Effect": "Allow",
+            "Action": [
+                "ec2:StopInstances",
+                "ec2:StartInstances"
+            ],
+            "Resource": "arn:aws:ec2:us-east-1:*:instance/*"
+        },
+        {
+            "Sid": "RemediateLambdaInRegion",
+            "Effect": "Allow",
+            "Action": [
+                "lambda:PutFunctionConcurrency",
+                "lambda:DeleteFunctionConcurrency",
+                "lambda:TagResource"
+            ],
+            "Resource": "arn:aws:lambda:us-east-1:*:function:*"
+        },
+        {
+            "Sid": "TagInRegion",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:CreateTags",
+                "rds:AddTagsToResource"
+            ],
+            "Resource": [
+                "arn:aws:ec2:us-east-1:*:instance/*",
+                "arn:aws:ec2:us-east-1:*:volume/*",
+                "arn:aws:rds:us-east-1:*:db:*"
+            ]
+        },
+        {
+            "Sid": "TagS3Buckets",
+            "Effect": "Allow",
+            "Action": "s3:PutBucketTagging",
+            "Resource": "arn:aws:s3:::*"
+        },
+        {
+            "Sid": "DenyMutatingProtectedResources",
+            "Effect": "Deny",
             "Action": [
                 "ec2:StopInstances",
                 "ec2:StartInstances",
                 "ec2:CreateTags",
-                "ec2:DeleteTags",
                 "lambda:PutFunctionConcurrency",
                 "lambda:DeleteFunctionConcurrency",
                 "lambda:TagResource",
-                "s3:PutBucketTagging",
                 "rds:AddTagsToResource"
             ],
             "Resource": "*",
             "Condition": {
-                "StringEquals": {
-                    "aws:RequestedRegion": "us-east-1"
+                "StringEqualsIgnoreCase": {
+                    "aws:ResourceTag/cloudsentry:protected": ["true", "yes", "1", "on"]
                 }
             }
+        },
+        {
+            "Sid": "DenyStoppingDoNotStop",
+            "Effect": "Deny",
+            "Action": "ec2:StopInstances",
+            "Resource": "*",
+            "Condition": {
+                "StringEqualsIgnoreCase": {
+                    "aws:ResourceTag/do-not-stop": ["true", "yes", "1", "on"]
+                }
+            }
+        },
+        {
+            "Sid": "DenyWritingProtectionTags",
+            "Effect": "Deny",
+            "Action": [
+                "ec2:CreateTags",
+                "lambda:TagResource",
+                "rds:AddTagsToResource"
+            ],
+            "Resource": "*",
+            "Condition": {
+                "ForAnyValue:StringEqualsIgnoreCase": {
+                    "aws:TagKeys": ["cloudsentry:protected", "do-not-stop"]
+                }
+            }
+        },
+        {
+            "Sid": "DenyDestructiveAlways",
+            "Effect": "Deny",
+            "Action": [
+                "ec2:TerminateInstances",
+                "ec2:DeleteVolume",
+                "ec2:DeleteSnapshot",
+                "ec2:DeleteTags",
+                "ec2:ModifyInstanceAttribute",
+                "lambda:DeleteFunction",
+                "lambda:UpdateFunctionCode",
+                "lambda:UpdateFunctionConfiguration",
+                "lambda:GetFunction",
+                "lambda:UntagResource",
+                "rds:DeleteDBInstance",
+                "rds:StopDBInstance",
+                "rds:ModifyDBInstance",
+                "rds:RemoveTagsFromResource",
+                "s3:DeleteBucket",
+                "s3:DeleteObject",
+                "s3:DeleteBucketTagging",
+                "s3:PutBucketPolicy",
+                "s3:GetObject",
+                "iam:*",
+                "sts:AssumeRole"
+            ],
+            "Resource": "*"
         }
     ]
 }
