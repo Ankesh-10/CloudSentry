@@ -12,11 +12,12 @@ from backend.app import auth
 from backend.app.main import app
 
 SECRET = os.environ["SUPABASE_JWT_SECRET"]
+ISSUER = os.environ["SUPABASE_URL"] + "/auth/v1"
 
 
 def _claims(sub="user-1", **extra):
     base = {"sub": sub, "email": "dev@example.com", "role": "authenticated", "aud": "authenticated",
-            "exp": int(time.time()) + 600}
+            "exp": int(time.time()) + 600, "iss": ISSUER}
     base.update(extra)
     return base
 
@@ -47,7 +48,85 @@ def test_liveness_is_public(client):
 
 
 def test_resources_require_auth(client):
-    assert client.get("/api/v1/resources/").status_code in (401, 403)
+    assert client.get("/api/v1/resources/").status_code == 401
+
+
+def _protected_routes():
+    # The OpenAPI schema lists every mounted endpoint, including those of
+    # lazily-included routers that app.routes does not expand.
+    import re
+    public = {"/api/v1/health", "/api/v1/health/live"}
+    for path, ops in app.openapi()["paths"].items():
+        if not path.startswith("/api/v1/") or path in public:
+            continue
+        concrete = re.sub(r"\{[^}]+\}", "00000000-0000-0000-0000-000000000000", path)
+        for method in ops:
+            yield method.upper(), concrete
+
+
+PROTECTED_ROUTES = sorted(set(_protected_routes()))
+
+
+def test_route_inventory_is_not_empty():
+    assert len(PROTECTED_ROUTES) > 15
+
+
+@pytest.mark.parametrize("method,path", PROTECTED_ROUTES)
+def test_every_route_requires_auth(client, method, path):
+    # Any new route that forgets the router-level dependency fails here.
+    assert client.request(method, path).status_code == 401
+
+
+@pytest.mark.parametrize("header", ["Basic dXNlcjpwYXNz", "Bearer", "Bearer not.a.jwt", "token"])
+def test_malformed_authorization_header(client, header):
+    assert client.get("/api/v1/resources/", headers={"Authorization": header}).status_code == 401
+
+
+def test_token_without_sub_rejected(client):
+    claims = _claims()
+    claims.pop("sub")
+    assert client.get("/api/v1/system/config", headers=_h(jwt.encode(claims, SECRET, algorithm="HS256"))).status_code == 401
+
+
+def test_wrong_issuer_rejected(client):
+    assert client.get("/api/v1/system/config", headers=_h(_token(iss="https://evil.example/auth/v1"))).status_code == 401
+
+
+def test_missing_issuer_rejected(client):
+    claims = _claims()
+    claims.pop("iss")
+    assert client.get("/api/v1/system/config", headers=_h(jwt.encode(claims, SECRET, algorithm="HS256"))).status_code == 401
+
+
+def test_anonymous_session_rejected_even_for_operator_id(client):
+    tok = _token("operator-1", is_anonymous=True)
+    assert client.get("/api/v1/system/config", headers=_h(tok)).status_code == 401
+
+
+def test_signed_in_user_without_role_cannot_read(client):
+    for path in ("/api/v1/resources/", "/api/v1/audit-logs/", "/api/v1/system/config"):
+        assert client.get(path, headers=_h(_token("stranger"))).status_code == 403
+
+
+def test_viewer_by_app_metadata_can_read(client):
+    tok = _token("someone", app_metadata={"cloudsentry_role": "viewer"})
+    assert client.get("/api/v1/system/config", headers=_h(tok)).status_code == 200
+
+
+def test_viewer_cannot_mutate(client, fake_db):
+    res = client.patch("/api/v1/system/config", json={"key": "DRY_RUN_MODE", "value": "true"},
+                       headers=_h(_token("viewer")))
+    assert res.status_code == 403
+
+
+def test_operator_is_also_viewer(client):
+    assert client.get("/api/v1/system/config", headers=_h(_token("operator-2"))).status_code == 200
+
+
+def test_viewer_role_can_be_disabled(client, monkeypatch):
+    from backend.app.config import settings
+    monkeypatch.setattr(settings, "REQUIRE_VIEWER_ROLE", False)
+    assert client.get("/api/v1/system/config", headers=_h(_token("stranger"))).status_code == 200
 
 
 def test_forged_empty_key_rejected(client):
@@ -184,3 +263,32 @@ def test_es256_jwks_token_verified(client, monkeypatch):
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
     forged = jwt.encode(_claims(), other, algorithm="ES256", headers={"kid": "k1"})
     assert client.get("/api/v1/system/config", headers=_h(forged)).status_code == 401
+
+    # No kid: must not fall back to "first key in the set", even a valid one.
+    no_kid = jwt.encode(_claims(), pem, algorithm="ES256")
+    assert client.get("/api/v1/system/config", headers=_h(no_kid)).status_code == 401
+
+
+def test_unknown_kid_does_not_force_jwks_refetch_storm(client, monkeypatch):
+    key = ec.generate_private_key(ec.SECP256R1())
+    pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+    calls = []
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"keys": [{"kty": "EC", "kid": "real"}]}
+
+    def fake_get(url, timeout):
+        calls.append(url)
+        return _Resp()
+
+    monkeypatch.setattr(auth.httpx, "get", fake_get)
+    monkeypatch.setitem(auth._jwks_cache, "keys", None)
+    monkeypatch.setitem(auth._jwks_cache, "fetched_at", 0.0)
+    for i in range(20):
+        tok = jwt.encode(_claims(), pem, algorithm="ES256", headers={"kid": f"junk-{i}"})
+        assert client.get("/api/v1/system/config", headers=_h(tok)).status_code == 401
+    assert len(calls) == 1

@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from backend.app import scheduler
 from backend.app.api import actions, anomalies, audit, dashboard, metrics, resources, system
-from backend.app.auth import get_current_user
+from backend.app.auth import require_viewer
 from backend.app.config import settings
 from backend.app.db.asyncpg_pool import close_db_pool, init_db_pool
 from backend.app.logging_config import configure_logging
@@ -83,7 +83,8 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
-auth_deps = [Depends(get_current_user)]
+# Every router needs at least viewer; mutating routes add require_operator.
+auth_deps = [Depends(require_viewer)]
 
 app.include_router(resources.router, prefix="/api/v1/resources", tags=["resources"], dependencies=auth_deps)
 app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"], dependencies=auth_deps)

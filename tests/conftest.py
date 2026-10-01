@@ -13,6 +13,7 @@ _TEST_ENV = {
     "SUPABASE_SERVICE_ROLE_KEY": "test-service-role",
     "DATABASE_URL": "",
     "OPERATOR_USER_IDS": "operator-1,operator-2",
+    "VIEWER_USER_IDS": "user-1,viewer",
     "AWS_ACCESS_KEY_ID": "testing",
     "AWS_SECRET_ACCESS_KEY": "testing",
     "AWS_SECURITY_TOKEN": "testing",

@@ -22,7 +22,8 @@ NOW = datetime.now(timezone.utc)
 
 
 def _auth(sub):
-    tok = jwt.encode({"sub": sub, "aud": "authenticated", "role": "authenticated", "exp": int(time.time()) + 600},
+    tok = jwt.encode({"sub": sub, "aud": "authenticated", "role": "authenticated", "exp": int(time.time()) + 600,
+                      "iss": "https://example.supabase.co/auth/v1"},
                      "test-secret-key-for-hs256", algorithm="HS256")
     return {"Authorization": f"Bearer {tok}"}
 

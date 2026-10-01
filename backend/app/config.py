@@ -11,9 +11,16 @@ class Settings(BaseSettings):
     SUPABASE_JWT_SECRET: str = ""
     SUPABASE_JWKS_URL: str = ""  # default: <SUPABASE_URL>/auth/v1/.well-known/jwks.json
     JWT_AUDIENCE: str = "authenticated"
+    JWT_ISSUER: str = ""  # default: <SUPABASE_URL>/auth/v1
     # Comma-separated Supabase user ids allowed to mutate cloud state / safety config.
     # Users can also be granted app_metadata.cloudsentry_role = "operator".
     OPERATOR_USER_IDS: str = ""
+    # Comma-separated user ids allowed to read (or app_metadata.cloudsentry_role
+    # = "viewer"). Operators are always viewers.
+    VIEWER_USER_IDS: str = ""
+    # false: any verified, non-anonymous user may read (only safe when Supabase
+    # sign-up is closed to your own team).
+    REQUIRE_VIEWER_ROLE: bool = True
     DATABASE_URL: str = ""
 
     # AWS
@@ -76,6 +83,9 @@ class Settings(BaseSettings):
 
     def operator_user_id_set(self) -> set[str]:
         return set(_split(self.OPERATOR_USER_IDS))
+
+    def viewer_user_id_set(self) -> set[str]:
+        return set(_split(self.VIEWER_USER_IDS))
 
     def required_tag_list(self) -> list[str]:
         return _split(self.REQUIRED_TAGS)
