@@ -27,3 +27,6 @@ services:
         value: "false"
       - key: DRY_RUN_MODE
         value: "true"
+      # Render's edge proxy is the only route in, so trust its X-Forwarded-For.
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"

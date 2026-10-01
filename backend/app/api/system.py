@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from backend.app.auth import actor_label, get_current_user, require_operator
+from backend.app.rate_limit import rate_limit
 from backend.app.services import runtime_config
 from backend.app.services.audit_logger import AuditLogger
 
@@ -63,14 +64,14 @@ def _set(key: str, value: str, user: dict):
     return {"status": "success", "key": key, "value": parsed}
 
 
-@router.patch("/config")
+@router.patch("/config", dependencies=[rate_limit("config", 20)])
 def update_system_config_body(payload: SystemConfigBody, user: dict = Depends(require_operator)):
     return _set(payload.key, payload.value, user)
 
 
 # Any authenticated user may stop automation: stopping is always the safe
 # direction, and it must not wait for an operator to be found.
-@router.post("/emergency-stop")
+@router.post("/emergency-stop", dependencies=[rate_limit("emergency_stop", 5)])
 def emergency_stop(user: dict = Depends(get_current_user)):
     flags, persisted = runtime_config.emergency_stop()
     AuditLogger().log_action(
@@ -82,7 +83,7 @@ def emergency_stop(user: dict = Depends(get_current_user)):
     return {"automation_enabled": False, "persisted": persisted, "config": flags}
 
 
-@router.patch("/{key}")
+@router.patch("/{key}", dependencies=[rate_limit("config", 20)])
 def update_system_config(payload: SystemConfigUpdate, key: str = Path(max_length=64),
                          user: dict = Depends(require_operator)):
     return _set(key, payload.value, user)

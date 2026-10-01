@@ -1,3 +1,5 @@
+import logging
+import threading
 from typing import List, Optional
 from uuid import UUID
 
@@ -7,8 +9,11 @@ from fastapi.concurrency import run_in_threadpool
 from backend.app.auth import require_operator
 from backend.app.db.asyncpg_pool import get_pool
 from backend.app.db.supabase_client import get_supabase_client
+from backend.app.rate_limit import rate_limit
 from backend.app.schemas.models import Resource
 from backend.app.services.discovery import DiscoveryError, DiscoveryService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -65,13 +70,25 @@ async def get_resource(resource_id: UUID):
     return {**bundle, "metrics_24h": metrics_24h}
 
 
-@router.post("/discover")
+# One manual discovery at a time per process: each run fans out into many
+# provider API calls, and overlapping runs only multiply throttling and cost.
+_discovery_lock = threading.Lock()
+
+
+@router.post("/discover", dependencies=[rate_limit("discover", 2)])
 def trigger_discovery(user: dict = Depends(require_operator)):
+    if not _discovery_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Discovery is already running")
     try:
         result = DiscoveryService().run()
     except DiscoveryError as e:
-        # Partial success: some resource types failed at the provider.
-        raise HTTPException(status_code=502, detail={"message": "Discovery partially failed", "result": e.summary})
+        # Partial success: some resource types failed at the provider. Which
+        # ones goes to the log, not to the client.
+        logger.warning("Manual discovery partially failed: %s", e.summary)
+        raise HTTPException(status_code=502, detail="Discovery partially failed")
     except Exception:
+        logger.exception("Manual discovery failed")
         raise HTTPException(status_code=500, detail="Discovery failed")
+    finally:
+        _discovery_lock.release()
     return {"status": "success", "result": result}

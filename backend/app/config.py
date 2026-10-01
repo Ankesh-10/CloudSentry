@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     BACKEND_PORT: int = 8000
     LOG_LEVEL: str = "INFO"
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
+    # /docs, /redoc and /openapi.json map every endpoint; keep them off in prod.
+    EXPOSE_API_DOCS: bool = False
+    # Per-client-IP ceiling across all endpoints (per process). Sensitive
+    # endpoints have tighter per-user limits in code.
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_PER_MINUTE: int = 300
     # Run background jobs in this process. Leader election still guarantees a
     # single active scheduler across replicas; set false for API-only replicas.
     SCHEDULER_ENABLED: bool = True

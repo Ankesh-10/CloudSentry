@@ -13,6 +13,7 @@ from backend.app.auth import require_viewer
 from backend.app.config import settings
 from backend.app.db.asyncpg_pool import close_db_pool, init_db_pool
 from backend.app.logging_config import configure_logging
+from backend.app.rate_limit import RateLimitMiddleware
 from backend.app.services import runtime_config
 
 configure_logging(settings.LOG_LEVEL)
@@ -60,17 +61,45 @@ async def lifespan(app: FastAPI):
     await close_db_pool()
 
 
+_docs = settings.EXPOSE_API_DOCS
 app = FastAPI(
     title="CloudSentry API",
     version="1.0.0",
     description="Autonomous cloud cost intelligence API",
     lifespan=lifespan,
+    docs_url="/docs" if _docs else None,
+    redoc_url="/redoc" if _docs else None,
+    openapi_url="/openapi.json" if _docs else None,
 )
 
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Strict-Transport-Security": "max-age=63072000; includeSubDomains",
+    # JSON API: nothing should ever render or be cached by intermediaries.
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+    "Cache-Control": "no-store",
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in SECURITY_HEADERS.items():
+        # The docs pages (when enabled) need their own CSP to load Swagger UI.
+        if name == "Content-Security-Policy" and request.url.path in ("/docs", "/redoc"):
+            continue
+        response.headers.setdefault(name, value)
+    return response
+
+
+app.add_middleware(RateLimitMiddleware)
+# Auth is a Bearer header, not cookies, so credentialed CORS is not needed.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list(),
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )

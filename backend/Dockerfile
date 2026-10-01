@@ -22,4 +22,7 @@ USER appuser
 
 EXPOSE 8000
 
-CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --proxy-headers: take the client IP from X-Forwarded-For, but only from
+# proxies listed in FORWARDED_ALLOW_IPS (uvicorn default: 127.0.0.1). The
+# per-IP rate limit depends on it.
+CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]

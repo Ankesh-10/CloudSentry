@@ -48,6 +48,18 @@ def _reset_runtime_flags():
     runtime_config.load_from_env()
 
 
+@pytest.fixture(autouse=True)
+def _reset_process_caches():
+    """Rate-limit windows and health caches are process-global too."""
+    from backend.app import rate_limit
+    from backend.app.services import health
+    rate_limit.reset_all()
+    health.reset_caches()
+    yield
+    rate_limit.reset_all()
+    health.reset_caches()
+
+
 @pytest.fixture
 def fake_db(monkeypatch):
     """Route every get_supabase_client() call to one shared in-memory fake."""

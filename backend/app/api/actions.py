@@ -8,10 +8,14 @@ from pydantic import BaseModel
 
 from backend.app.auth import actor_label, require_operator
 from backend.app.db.supabase_client import get_supabase_client
+from backend.app.rate_limit import rate_limit
 from backend.app.schemas.models import Action
 from backend.app.services.action_runner import REVERSIBLE, ActionRunner
 
 router = APIRouter()
+
+# Per-operator ceiling on state-changing calls (approve/execute/rollback share it).
+_mutation_limit = [rate_limit("actions", 30)]
 
 ActionStatus = Literal[
     "pending", "pending_approval", "approved", "rejected", "executing", "completed", "failed", "rolled_back"
@@ -54,7 +58,7 @@ def get_action(action_id: UUID):
     return _get(action_id)
 
 
-@router.post("/{action_id}/approve", response_model=Action)
+@router.post("/{action_id}/approve", response_model=Action, dependencies=_mutation_limit)
 def approve_action(
     action_id: UUID,
     payload: ActionApproval,
@@ -86,7 +90,7 @@ def approve_action(
     return res.data[0]
 
 
-@router.post("/{action_id}/execute", status_code=202)
+@router.post("/{action_id}/execute", status_code=202, dependencies=_mutation_limit)
 def execute_action(action_id: UUID, background_tasks: BackgroundTasks, user: dict = Depends(require_operator)):
     action = _get(action_id)
     runnable = action["status"] == "approved" or (
@@ -98,7 +102,7 @@ def execute_action(action_id: UUID, background_tasks: BackgroundTasks, user: dic
     return {"status": "queued", "id": str(action_id)}
 
 
-@router.post("/{action_id}/rollback", status_code=202)
+@router.post("/{action_id}/rollback", status_code=202, dependencies=_mutation_limit)
 def rollback_action(action_id: UUID, background_tasks: BackgroundTasks, user: dict = Depends(require_operator)):
     action = _get(action_id)
     if action["status"] != "completed":
