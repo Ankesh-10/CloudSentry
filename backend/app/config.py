@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     MAX_ACTIONS_PER_DAY: int = 5
     ACTION_COOLDOWN_MINUTES: int = 30
     MAX_CW_API_CALLS_PER_HOUR: int = 200
+    # Retention (days, minimum 90 — the audit_logs trigger refuses younger deletes).
+    AUDIT_RETENTION_DAYS: int = 365
+    HISTORY_RETENTION_DAYS: int = 365  # finished actions, closed anomalies
     # Enabling automation or disabling dry-run needs a second operator to confirm.
     REQUIRE_TWO_PERSON_CONFIG: bool = True
 

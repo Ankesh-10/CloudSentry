@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from backend.app.auth import actor_label, get_current_user, require_operator
 from backend.app.rate_limit import rate_limit
 from backend.app.services import runtime_config
-from backend.app.services.audit_logger import AuditLogger
+from backend.app.services.audit_logger import AuditLogger, AuditWriteError
 
 router = APIRouter()
 
@@ -34,6 +34,21 @@ def get_system_configs():
 
 def _set(key: str, value: str, user: dict):
     actor = actor_label(user)
+    try:
+        runtime_config.validate(key, value)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # Audit first: if the trail cannot be written, the change does not happen.
+    try:
+        AuditLogger().log_action(
+            event_type="config_change_attempted",
+            actor=actor,
+            request_params={"key": key, "value": value},
+            message=f"{actor} attempting {key}={value}",
+            required=True,
+        )
+    except AuditWriteError:
+        raise HTTPException(status_code=503, detail="Audit log unavailable; change not applied")
     try:
         result = runtime_config.request_change(key, value, actor)
     except ValueError as e:
@@ -73,14 +88,15 @@ def update_system_config_body(payload: SystemConfigBody, user: dict = Depends(re
 # direction, and it must not wait for an operator to be found.
 @router.post("/emergency-stop", dependencies=[rate_limit("emergency_stop", 5)])
 def emergency_stop(user: dict = Depends(get_current_user)):
+    # The stop always takes effect; an audit failure is reported, not fatal.
     flags, persisted = runtime_config.emergency_stop()
-    AuditLogger().log_action(
+    audited = AuditLogger().log_action(
         event_type="emergency_stop",
         actor=actor_label(user),
         response_status="persisted" if persisted else "in_memory_only",
         message="GLOBAL_AUTOMATION_ENABLED set to false via emergency stop",
     )
-    return {"automation_enabled": False, "persisted": persisted, "config": flags}
+    return {"automation_enabled": False, "persisted": persisted, "audit_logged": audited, "config": flags}
 
 
 @router.patch("/{key}", dependencies=[rate_limit("config", 20)])

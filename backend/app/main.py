@@ -14,6 +14,7 @@ from backend.app.config import settings
 from backend.app.db.asyncpg_pool import close_db_pool, init_db_pool
 from backend.app.logging_config import configure_logging
 from backend.app.rate_limit import RateLimitMiddleware
+from backend.app.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
 from backend.app.services import runtime_config
 
 configure_logging(settings.LOG_LEVEL)
@@ -101,8 +102,11 @@ app.add_middleware(
     allow_origins=settings.cors_origin_list(),
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", REQUEST_ID_HEADER],
+    expose_headers=[REQUEST_ID_HEADER],
 )
+# Added last = outermost: every response, including 429s, carries a request id.
+app.add_middleware(RequestContextMiddleware)
 
 
 @app.exception_handler(Exception)

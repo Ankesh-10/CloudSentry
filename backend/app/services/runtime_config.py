@@ -69,6 +69,13 @@ def _parse(key: str, value: Any) -> Any:
     return parsed
 
 
+def validate(key: str, value: Any) -> Any:
+    """Parse without applying. Raises ValueError for unknown keys or bad values."""
+    if key not in KNOWN_KEYS:
+        raise ValueError(f"Unknown configuration key: {key}")
+    return _parse(key, value)
+
+
 def _is_safer(key: str, value: Any) -> bool:
     """Changes that can only reduce what the agent does to the cloud."""
     return (key == "GLOBAL_AUTOMATION_ENABLED" and value is False) or (key == "DRY_RUN_MODE" and value is True)
