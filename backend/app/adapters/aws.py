@@ -258,6 +258,57 @@ class AWSAdapter(CloudAdapter):
             logger.error("Failed to apply tags to %s: %s", resource_id, e)
             return False
 
+    def get_tags(self, resource_id: str, resource_type: str) -> Optional[Dict[str, str]]:
+        """Live tags (None = could not read). resource_id is the instance /
+        volume id, bucket name, or ARN for lambda and rds."""
+        try:
+            if resource_type == "ec2":
+                resp = self.ec2.describe_instances(InstanceIds=[resource_id])
+                return _tags_to_dict(resp["Reservations"][0]["Instances"][0].get("Tags"))
+            if resource_type == "ebs":
+                resp = self.ec2.describe_volumes(VolumeIds=[resource_id])
+                return _tags_to_dict(resp["Volumes"][0].get("Tags"))
+            if resource_type == "lambda":
+                return self._lambda_tags(resource_id)
+            if resource_type == "s3":
+                return self._bucket_tags(resource_id, strict=True)
+            if resource_type == "rds":
+                resp = self.rds.describe_db_instances(Filters=[{"Name": "db-instance-id", "Values": [resource_id]}])
+                dbs = resp.get("DBInstances") or []
+                return _tags_to_dict(dbs[0].get("TagList")) if dbs else None
+        except (ClientError, BotoCoreError, CloudProviderError, IndexError, KeyError) as e:
+            logger.error("Failed to read tags for %s: %s", resource_id, e)
+            return None
+        logger.error("Unsupported resource type for tag read: %s", resource_type)
+        return None
+
+    def remove_tags(self, resource_id: str, keys: List[str], resource_type: str) -> bool:
+        if not keys:
+            return True
+        try:
+            if resource_type in ("ec2", "ebs"):
+                self.ec2.delete_tags(Resources=[resource_id], Tags=[{"Key": k} for k in keys])
+            elif resource_type == "lambda":
+                self.lambda_client.untag_resource(Resource=resource_id, TagKeys=list(keys))
+            elif resource_type == "s3":
+                # No per-key delete for buckets: rewrite the set without the keys.
+                remaining = {k: v for k, v in (self._bucket_tags(resource_id, strict=True) or {}).items()
+                             if k not in set(keys)}
+                if remaining:
+                    tag_set = [{"Key": k, "Value": v} for k, v in remaining.items()]
+                    self.s3.put_bucket_tagging(Bucket=resource_id, Tagging={"TagSet": tag_set})
+                else:
+                    self.s3.delete_bucket_tagging(Bucket=resource_id)
+            elif resource_type == "rds":
+                self.rds.remove_tags_from_resource(ResourceName=resource_id, TagKeys=list(keys))
+            else:
+                logger.error("Unsupported resource type for tag removal: %s", resource_type)
+                return False
+            return True
+        except (ClientError, BotoCoreError, CloudProviderError) as e:
+            logger.error("Failed to remove tags from %s: %s", resource_id, e)
+            return False
+
     def _lambda_tags(self, arn: Optional[str]) -> Optional[Dict[str, str]]:
         """Returns None (not {}) when tags could not be read, so callers never
         mistake a permissions/API failure for an untagged resource."""

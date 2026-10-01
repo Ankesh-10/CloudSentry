@@ -57,6 +57,14 @@ class CloudAdapter(ABC):
     def apply_tags(self, resource_id: str, tags: Dict[str, str], resource_type: str) -> bool:
         pass
 
+    def get_tags(self, resource_id: str, resource_type: str) -> Optional[Dict[str, str]]:
+        """Current tags, or None if they could not be read. Default: unsupported."""
+        return None
+
+    def remove_tags(self, resource_id: str, keys: List[str], resource_type: str) -> bool:
+        """Remove only the given tag keys. Default: unsupported."""
+        return False
+
     @abstractmethod
     def get_instance_state(self, instance_id: str) -> Optional[str]:
         pass

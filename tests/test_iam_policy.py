@@ -13,7 +13,12 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 # boto3 client attribute -> IAM service prefix
 SERVICES = {"ec2": "ec2", "lambda_client": "lambda", "s3": "s3", "rds": "rds", "cloudwatch": "cloudwatch"}
 # boto3 operations whose IAM action name differs from the CamelCased op name.
-IAM_NAME = {"s3:ListBuckets": "s3:ListAllMyBuckets", "rds:DescribeDbInstances": "rds:DescribeDBInstances"}
+IAM_NAME = {
+    "s3:ListBuckets": "s3:ListAllMyBuckets",
+    "rds:DescribeDbInstances": "rds:DescribeDBInstances",
+    # S3 authorises DeleteBucketTagging with the s3:PutBucketTagging permission.
+    "s3:DeleteBucketTagging": "s3:PutBucketTagging",
+}
 
 with open(os.path.join(ROOT, "cloud_permissions", "aws_iam_policy.json"), encoding="utf-8") as f:
     POLICY = json.load(f)
@@ -57,8 +62,8 @@ def test_no_unused_allow_grants():
 def test_destructive_actions_never_allowed_and_explicitly_denied():
     allowed = set().union(*(a for _, a in _statements("Allow")))
     denied = set().union(*(a for _, a in _statements("Deny")))
-    for action in ("ec2:TerminateInstances", "ec2:DeleteVolume", "ec2:DeleteTags", "lambda:DeleteFunction",
-                   "lambda:GetFunction", "rds:DeleteDBInstance", "s3:DeleteBucket", "s3:DeleteBucketTagging"):
+    for action in ("ec2:TerminateInstances", "ec2:DeleteVolume", "lambda:DeleteFunction",
+                   "lambda:GetFunction", "rds:DeleteDBInstance", "s3:DeleteBucket"):
         assert action not in allowed
         assert action in denied
 
@@ -68,8 +73,15 @@ def test_protection_tags_are_enforced_by_iam():
     protected = sids["DenyMutatingProtectedResources"]["Condition"]["StringEqualsIgnoreCase"]
     assert "aws:ResourceTag/cloudsentry:protected" in protected
     assert "ec2:StopInstances" in sids["DenyStoppingDoNotStop"]["Action"]
-    keys = sids["DenyWritingProtectionTags"]["Condition"]["ForAnyValue:StringEqualsIgnoreCase"]["aws:TagKeys"]
+    touching = sids["DenyTouchingProtectionTags"]
+    keys = touching["Condition"]["ForAnyValue:StringEqualsIgnoreCase"]["aws:TagKeys"]
     assert {"cloudsentry:protected", "do-not-stop"} <= set(keys)
+    # Every tag write *and removal* the policy allows is covered, so protection
+    # can be neither overwritten nor stripped.
+    allowed = set().union(*(a for _, a in _statements("Allow")))
+    tag_mutations = {a for a in allowed if re.search(r"(Tag|Untag)", a) and not re.search(r":(Get|List)", a)}
+    tag_mutations -= {"s3:PutBucketTagging"}  # documented IAM limit: see cloud_permissions/README.md
+    assert tag_mutations <= set(touching["Action"]), tag_mutations - set(touching["Action"])
 
 
 def test_mutations_are_scoped_to_arns_not_star():

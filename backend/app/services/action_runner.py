@@ -7,13 +7,14 @@ from backend.app.config import settings
 from backend.app.db.supabase_client import get_supabase_client
 from backend.app.services import runtime_config
 from backend.app.services.audit_logger import AuditLogger
-from backend.app.services.safety_layer import DESTRUCTIVE_ACTIONS, SafetyLayer
+from backend.app.services.safety_layer import DESTRUCTIVE_ACTIONS, NO_CLOUD_ACTIONS, SafetyLayer
 
 logger = logging.getLogger(__name__)
 
 REVERSIBLE = {
     "stop_ec2": "start_ec2",
     "limit_lambda": "restore_lambda_concurrency",
+    "apply_tags": "remove_tags",
 }
 
 VERIFY_TARGETS = {
@@ -241,7 +242,9 @@ class ActionRunner:
             return True
 
         self._finish(action_id, resource, action, success, message, executed_at=now, actor=actor)
-        if success:
+        # A recommendation fixes nothing by itself; its anomaly stays open
+        # until the underlying condition actually clears.
+        if success and action["action_type"] not in NO_CLOUD_ACTIONS:
             self._resolve_anomaly(action)
         return success
 
@@ -466,6 +469,8 @@ class ActionRunner:
                     success = self.cloud.start_instance(resource["provider_id"])
                     message = "EC2 start requested." if success else "Failed to start EC2."
                     needs_verify = success
+                elif reverse_type == "remove_tags":
+                    success, message = self._remove_added_tags(original, resource)
                 else:
                     stored = (original.get("pre_state") or {}).get("reserved_concurrency")
                     if stored is None:
@@ -552,6 +557,9 @@ class ActionRunner:
 
     def _capture_pre_state(self, action, resource) -> dict:
         pre = {"state": resource.get("state"), "metadata": resource.get("metadata"), "tags": resource.get("tags")}
+        if action["action_type"] == "apply_tags":
+            # Exactly what we are about to add, so a rollback removes only that.
+            pre["added_tags"] = self._missing_tags(resource)
         if action["action_type"] == "limit_lambda":
             pre["reserved_concurrency"] = self.cloud.get_function_concurrency(resource["provider_id"])
         if action["action_type"] == "stop_ec2":
@@ -584,17 +592,54 @@ class ActionRunner:
             new_tags = self._missing_tags(resource)
             if not new_tags:
                 return True, "Required tags already present; nothing to apply.", False
-            tag_target = provider_id
-            if resource["resource_type"] in ("lambda", "rds"):
-                tag_target = (resource.get("metadata") or {}).get("arn")
-                if not tag_target:
-                    return False, "Resource ARN unknown; cannot tag.", False
-            success = self.cloud.apply_tags(tag_target, new_tags, resource["resource_type"])
-            if success:
-                merged = {**(resource.get("tags") or {}), **new_tags}
-                self.db.table("resources").update({"tags": merged}).eq("id", resource["id"]).execute()
-            return success, f"Applied tags {sorted(new_tags)}." if success else "Failed to apply tags.", False
+            tag_target = self._tag_target(resource)
+            if not tag_target:
+                return False, "Resource ARN unknown; cannot tag.", False
+            rtype = resource["resource_type"]
+            if not self.cloud.apply_tags(tag_target, new_tags, rtype):
+                return False, "Failed to apply tags.", False
+            # Read back: a write the provider accepted but did not persist (or
+            # that a concurrent writer overwrote) must not be reported as done.
+            live = self.cloud.get_tags(tag_target, rtype)
+            if live is None or any(live.get(k) != v for k, v in new_tags.items()):
+                return False, "Tag write not confirmed by read-back.", False
+            self.db.table("resources").update({"tags": live}).eq("id", resource["id"]).execute()
+            return True, f"Applied tags {sorted(new_tags)}.", False
+        if action_type in NO_CLOUD_ACTIONS:
+            return True, "Recommendation acknowledged; no cloud change made.", False
         return False, f"Unsupported action type: {action_type}", False
+
+    def _tag_target(self, resource: dict) -> Optional[str]:
+        """Tagging APIs take the ARN for lambda and rds, the id/name otherwise."""
+        if resource["resource_type"] in ("lambda", "rds"):
+            return (resource.get("metadata") or {}).get("arn")
+        return resource["provider_id"]
+
+    def _remove_added_tags(self, original: dict, resource: dict) -> tuple[bool, str]:
+        """Undo apply_tags: remove the keys we added, but only where the value
+        is still ours — a tag a human has since set to a real value is kept."""
+        added = (original.get("pre_state") or {}).get("added_tags") or {}
+        if not added:
+            return True, "Original action added no tags; nothing to remove."
+        target = self._tag_target(resource)
+        rtype = resource["resource_type"]
+        if not target:
+            return False, "Resource ARN unknown; cannot remove tags."
+        live = self.cloud.get_tags(target, rtype)
+        if live is None:
+            return False, "Could not read current tags; nothing removed."
+        to_remove = sorted(k for k, v in added.items() if live.get(k) == v)
+        kept = sorted(k for k in added if k not in to_remove)
+        if to_remove and not self.cloud.remove_tags(target, to_remove, rtype):
+            return False, "Failed to remove tags."
+        after = self.cloud.get_tags(target, rtype)
+        if after is None or any(k in after for k in to_remove):
+            return False, "Tag removal not confirmed by read-back."
+        self.db.table("resources").update({"tags": after}).eq("id", resource["id"]).execute()
+        message = f"Removed tags {to_remove}."
+        if kept:
+            message += f" Kept {kept} (changed since they were added)."
+        return True, message
 
     def _finish(self, action_id, resource, action, success, message, executed_at=None, dry=False, actor="SYSTEM", blocked=False):
         final_status = "completed" if success else "failed"

@@ -393,6 +393,94 @@ def test_rollback_allowed_while_kill_switch_on(aws, fake_db):
     assert _state(iid) == "running"
 
 
+# -- tagging: reversible, verified, throttled ---------------------------------------
+
+def _ec2_tags(iid):
+    ec2 = boto3.client("ec2", region_name="us-east-1")
+    inst = ec2.describe_instances(InstanceIds=[iid])["Reservations"][0]["Instances"][0]
+    return {t["Key"]: t["Value"] for t in inst.get("Tags", [])}
+
+
+def _tagged_instance(fake_db, existing=None):
+    iid = _instance(tags=existing)
+    _seed(fake_db, iid, action_type="apply_tags", tags=dict(existing or {}))
+    fake_db.rows("anomalies")[0]["anomaly_type"] = "untagged_resource"
+    _live()
+    runner = ActionRunner()
+    assert runner.execute_action("a1") is True
+    return iid, runner
+
+
+def test_apply_tags_records_what_it_added_and_rolls_back_only_that(aws, fake_db):
+    iid, runner = _tagged_instance(fake_db, existing={"Team": "core"})
+    assert _ec2_tags(iid) == {"Team": "core", "Project": "unassigned", "Owner": "unassigned",
+                              "cloudsentry:auto-tagged": "true"}
+    assert set(_action(fake_db)["pre_state"]["added_tags"]) == {"Project", "Owner", "cloudsentry:auto-tagged"}
+    assert runner.rollback_action("a1", "USER:op") is True
+    assert _ec2_tags(iid) == {"Team": "core"}
+    assert _action(fake_db)["status"] == "rolled_back"
+    assert fake_db.rows("resources")[0]["tags"] == {"Team": "core"}
+
+
+def test_tag_rollback_keeps_values_a_human_changed(aws, fake_db):
+    iid, runner = _tagged_instance(fake_db)
+    boto3.client("ec2", region_name="us-east-1").create_tags(
+        Resources=[iid], Tags=[{"Key": "Owner", "Value": "alice"}])
+    assert runner.rollback_action("a1", "USER:op") is True
+    assert _ec2_tags(iid) == {"Owner": "alice"}
+    rollback = _action(fake_db, _action(fake_db)["rollback_action_id"])
+    assert "Kept ['Owner']" in rollback["post_state"]["result"]
+
+
+def test_unconfirmed_tag_write_is_failure(aws, fake_db, monkeypatch):
+    iid = _instance()
+    _seed(fake_db, iid, action_type="apply_tags")
+    _live()
+    runner = ActionRunner()
+    monkeypatch.setattr(runner.cloud, "get_tags", lambda target, rtype: {})
+    assert runner.execute_action("a1") is False
+    assert "not confirmed" in _action(fake_db)["post_state"]["result"]
+    assert fake_db.rows("anomalies")[0]["status"] == "active"
+
+
+def test_tag_writes_have_their_own_daily_cap(aws, fake_db, monkeypatch):
+    iid = _instance()
+    _seed(fake_db, iid, action_type="apply_tags")
+    fake_db.rows("optimization_actions").append({
+        "id": "earlier", "resource_id": "r-other", "action_type": "apply_tags", "status": "completed",
+        "dry_run": False, "executed_at": NOW.isoformat(), "created_at": NOW.isoformat()})
+    monkeypatch.setattr(settings, "MAX_TAG_ACTIONS_PER_DAY", 1)
+    _live()
+    assert ActionRunner().execute_action("a1") is False
+    assert "Daily tagging limit" in _action(fake_db)["post_state"]["result"]
+    assert _ec2_tags(iid) == {}
+
+
+def test_tag_writes_do_not_consume_the_state_change_cap(aws, fake_db):
+    iid = _instance()
+    _seed(fake_db, iid, action_type="apply_tags")
+    runtime_config.set_flag("MAX_ACTIONS_PER_DAY", 0, persist=False)
+    _live()
+    assert ActionRunner().execute_action("a1") is True
+
+
+def test_recommend_review_makes_no_cloud_call_and_keeps_anomaly_open(aws, fake_db, monkeypatch):
+    _seed(fake_db, "vol-123", rtype="ebs", action_type="recommend_review", status="approved",
+          requires_approval=True, state="available")
+    _action(fake_db)["approved_at"] = NOW.isoformat()
+    fake_db.rows("anomalies")[0]["anomaly_type"] = "unused_volume"
+    runtime_config.set_flag("DRY_RUN_MODE", False, persist=False)  # automation stays OFF
+    runner = ActionRunner()
+    calls = []
+    for name in ("apply_tags", "stop_instance", "start_instance", "remove_tags"):
+        monkeypatch.setattr(runner.cloud, name, lambda *a, _n=name, **k: calls.append(_n))
+    assert runner.execute_action("a1") is True
+    assert calls == []
+    assert _action(fake_db)["status"] == "completed"
+    assert "no cloud change" in _action(fake_db)["post_state"]["result"]
+    assert fake_db.rows("anomalies")[0]["status"] == "active"
+
+
 def test_apply_tags_adds_only_missing_and_preserves_s3_tags(aws, fake_db):
     s3 = boto3.client("s3", region_name="us-east-1")
     s3.create_bucket(Bucket="bkt")

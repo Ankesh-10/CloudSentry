@@ -21,8 +21,13 @@ with leaked credentials or an app bug:
 |---|---|
 | No stop/start/concurrency change/tagging on resources tagged `cloudsentry:protected=true` | `DenyMutatingProtectedResources` |
 | No stopping instances tagged `do-not-stop=true` | `DenyStoppingDoNotStop` |
-| Cannot add or overwrite the `cloudsentry:protected` / `do-not-stop` tag keys (so protection cannot be stripped by re-tagging) | `DenyWritingProtectionTags` |
-| No delete/terminate/modify, no removing tags, no reading function code or objects, no IAM | `DenyDestructiveAlways` |
+| Cannot add, overwrite or remove the `cloudsentry:protected` / `do-not-stop` tag keys (so protection cannot be stripped) | `DenyTouchingProtectionTags` |
+| No delete/terminate/modify, no reading function code or objects, no IAM | `DenyDestructiveAlways` |
+
+Tag *removal* (`ec2:DeleteTags`, `lambda:UntagResource`,
+`rds:RemoveTagsFromResource`) is allowed only so an `apply_tags` action can be
+rolled back; the app removes only the keys it added, and only while they still
+hold the value it wrote.
 | Writes only to instance, volume, function and DB ARNs in the configured region | `Remediate*`, `TagInRegion` |
 
 ## Known limits of IAM here

@@ -43,7 +43,8 @@
             "Action": [
                 "lambda:PutFunctionConcurrency",
                 "lambda:DeleteFunctionConcurrency",
-                "lambda:TagResource"
+                "lambda:TagResource",
+                "lambda:UntagResource"
             ],
             "Resource": "arn:aws:lambda:us-east-1:*:function:*"
         },
@@ -52,7 +53,9 @@
             "Effect": "Allow",
             "Action": [
                 "ec2:CreateTags",
-                "rds:AddTagsToResource"
+                "ec2:DeleteTags",
+                "rds:AddTagsToResource",
+                "rds:RemoveTagsFromResource"
             ],
             "Resource": [
                 "arn:aws:ec2:us-east-1:*:instance/*",
@@ -73,10 +76,13 @@
                 "ec2:StopInstances",
                 "ec2:StartInstances",
                 "ec2:CreateTags",
+                "ec2:DeleteTags",
                 "lambda:PutFunctionConcurrency",
                 "lambda:DeleteFunctionConcurrency",
                 "lambda:TagResource",
-                "rds:AddTagsToResource"
+                "lambda:UntagResource",
+                "rds:AddTagsToResource",
+                "rds:RemoveTagsFromResource"
             ],
             "Resource": "*",
             "Condition": {
@@ -97,12 +103,15 @@
             }
         },
         {
-            "Sid": "DenyWritingProtectionTags",
+            "Sid": "DenyTouchingProtectionTags",
             "Effect": "Deny",
             "Action": [
                 "ec2:CreateTags",
+                "ec2:DeleteTags",
                 "lambda:TagResource",
-                "rds:AddTagsToResource"
+                "lambda:UntagResource",
+                "rds:AddTagsToResource",
+                "rds:RemoveTagsFromResource"
             ],
             "Resource": "*",
             "Condition": {
@@ -118,20 +127,16 @@
                 "ec2:TerminateInstances",
                 "ec2:DeleteVolume",
                 "ec2:DeleteSnapshot",
-                "ec2:DeleteTags",
                 "ec2:ModifyInstanceAttribute",
                 "lambda:DeleteFunction",
                 "lambda:UpdateFunctionCode",
                 "lambda:UpdateFunctionConfiguration",
                 "lambda:GetFunction",
-                "lambda:UntagResource",
                 "rds:DeleteDBInstance",
                 "rds:StopDBInstance",
                 "rds:ModifyDBInstance",
-                "rds:RemoveTagsFromResource",
                 "s3:DeleteBucket",
                 "s3:DeleteObject",
-                "s3:DeleteBucketTagging",
                 "s3:PutBucketPolicy",
                 "s3:GetObject",
                 "iam:*",

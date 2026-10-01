@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from backend.app.config import settings
 from backend.app.db.pagination import fetch_all
 from backend.app.db.supabase_client import get_supabase_client
 from backend.app.services import runtime_config
@@ -12,12 +13,15 @@ DESTRUCTIVE_ACTIONS = {"delete_ebs_volume", "delete_volume", "terminate_ec2", "d
 # Forward actions that raise spend; only these are gated by the budget caps.
 # Stopping or capping resources lowers spend and must stay possible when over budget.
 COST_INCREASING_ACTIONS = {"start_ec2"}
+# Actions that never call the cloud (a recorded recommendation for a human).
+NO_CLOUD_ACTIONS = {"recommend_review"}
 # RDS is never mutated automatically; metadata-only actions are allowed.
-RDS_ALLOWED_ACTIONS = {"apply_tags"}
+RDS_ALLOWED_ACTIONS = {"apply_tags", "remove_tags"} | NO_CLOUD_ACTIONS
 # Metadata-only actions: exempt from (and not counted by) the daily cap and
 # cooldown, which exist to bound state changes. Otherwise auto-tagging a large
-# untagged estate would consume the whole cap and starve idle-EC2 stops.
-METADATA_ONLY_ACTIONS = {"apply_tags"}
+# untagged estate would consume the whole cap and starve idle-EC2 stops. They
+# have their own, larger daily cap (MAX_TAG_ACTIONS_PER_DAY) instead.
+METADATA_ONLY_ACTIONS = {"apply_tags", "remove_tags"}
 IN_FLIGHT_STATUSES = ["pending", "pending_approval", "approved", "executing"]
 
 
@@ -81,6 +85,10 @@ class SafetyLayer:
         self, action_type: str, resource_id: str, action_id: Optional[str] = None
     ) -> tuple[bool, str]:
         """Full gate evaluated immediately before any mutating cloud call."""
+        if action_type in NO_CLOUD_ACTIONS:
+            # Acknowledging a recommendation changes nothing in the cloud, so
+            # it stays possible while automation is stopped.
+            return True, "No cloud change."
         if not runtime_config.automation_enabled():
             return False, "GLOBAL_AUTOMATION_ENABLED is False (Kill-switch activated)."
 
@@ -88,11 +96,15 @@ class SafetyLayer:
         if not ok:
             return ok, reason
 
-        if action_type in METADATA_ONLY_ACTIONS:
-            return True, "Passed all safety checks."
-
         now = datetime.now(timezone.utc)
         start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        if action_type in METADATA_ONLY_ACTIONS:
+            tag_cap = int(settings.MAX_TAG_ACTIONS_PER_DAY)
+            tagged = self._metadata_executions_since(start_of_day, exclude_action_id=action_id)
+            if len(tagged) >= tag_cap:
+                return False, f"Daily tagging limit reached ({len(tagged)} >= {tag_cap})."
+            return True, "Passed all safety checks."
 
         max_actions = int(runtime_config.get_flag("MAX_ACTIONS_PER_DAY", 5))
         today = self._real_executions_since(start_of_day, exclude_action_id=action_id)
@@ -179,6 +191,19 @@ class SafetyLayer:
         for row in submitted + failed_after_submit + claimed:
             seen[row["id"]] = row
         return list(seen.values())
+
+    def _metadata_executions_since(self, since: datetime, exclude_action_id: Optional[str] = None) -> list:
+        """Real tag writes since `since`, plus claimed-not-yet-finished ones."""
+        def base():
+            q = self.db.table("optimization_actions").select("id").in_("action_type", sorted(METADATA_ONLY_ACTIONS))
+            if exclude_action_id:
+                q = q.neq("id", exclude_action_id)
+            return q
+
+        done = (base().eq("dry_run", False).in_("status", ["completed", "rolled_back"])
+                .gte("executed_at", since.isoformat()).execute().data or [])
+        claimed = (base().eq("status", "executing").gte("claimed_at", since.isoformat()).execute().data or [])
+        return list({r["id"]: r for r in done + claimed}.values())
 
     def budget_status(self, now: Optional[datetime] = None) -> tuple[bool, str]:
         """Returns (over_budget, reason). Fails closed: unknown spend counts as over."""

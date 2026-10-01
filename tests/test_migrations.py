@@ -52,6 +52,16 @@ def test_discovered_resource_types_are_allowed():
     assert discovered and discovered <= _vocab(SQL_009, "resources_resource_type_check")
 
 
+def test_migration_010_turns_ebs_policy_into_a_recommendation():
+    sql = _sql("010_recommend_review_policy.sql")
+    assert "SET action_type = 'recommend_review'" in sql and "requires_approval = true" in sql
+    # Retired proposals must be re-proposable: 'rejected' blocks that forever.
+    assert "SET status = 'failed'" in sql
+    from backend.app.services.policy_engine import TERMINAL_NO_REPROPOSE
+    assert "failed" not in TERMINAL_NO_REPROPOSE
+    assert "recommend_review" in _vocab(SQL_009, "policies_action_type_check")
+
+
 def test_migrations_are_numbered_contiguously():
     nums = sorted(int(f[:3]) for f in os.listdir(MIGRATIONS) if re.match(r"^\d{3}_.*\.sql$", f))
     assert nums == list(range(1, len(nums) + 1))

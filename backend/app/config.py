@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     MAX_ACTIONS_PER_DAY: int = 5
     ACTION_COOLDOWN_MINUTES: int = 30
     MAX_CW_API_CALLS_PER_HOUR: int = 200
+    # Tag writes (apply/remove) are exempt from MAX_ACTIONS_PER_DAY; this caps them.
+    MAX_TAG_ACTIONS_PER_DAY: int = 50
     # Proposals/approvals older than this are expired instead of executed.
     APPROVAL_TTL_HOURS: int = 72
     # Retention (days, minimum 90 — the audit_logs trigger refuses younger deletes).

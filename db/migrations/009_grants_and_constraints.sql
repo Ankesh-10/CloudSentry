@@ -24,9 +24,10 @@ END $$;
 
 SELECT pg_temp.add_check('resources', 'resources_resource_type_check',
     $c$resource_type IN ('ec2','lambda','s3','rds','ebs')$c$);
--- start_ec2 / restore_lambda_concurrency are written by rollbacks (action_runner.REVERSIBLE).
+-- start_ec2 / restore_lambda_concurrency / remove_tags are written by rollbacks
+-- (action_runner.REVERSIBLE); recommend_review never calls the cloud.
 SELECT pg_temp.add_check('optimization_actions', 'optimization_actions_action_type_check',
-    $c$action_type IN ('stop_ec2','start_ec2','limit_lambda','restore_lambda_concurrency','apply_tags')$c$);
+    $c$action_type IN ('stop_ec2','start_ec2','limit_lambda','restore_lambda_concurrency','apply_tags','remove_tags','recommend_review')$c$);
 SELECT pg_temp.add_check('optimization_actions', 'optimization_actions_risk_level_check',
     $c$risk_level IS NULL OR risk_level IN ('LOW','MEDIUM','HIGH')$c$);
 SELECT pg_temp.add_check('optimization_actions', 'optimization_actions_savings_check',
@@ -38,7 +39,7 @@ SELECT pg_temp.add_check('anomalies', 'anomalies_confidence_check',
 SELECT pg_temp.add_check('policies', 'policies_resource_type_check',
     $c$resource_type IN ('ec2','lambda','s3','rds','ebs','*')$c$);
 SELECT pg_temp.add_check('policies', 'policies_action_type_check',
-    $c$action_type IN ('stop_ec2','start_ec2','limit_lambda','apply_tags')$c$);
+    $c$action_type IN ('stop_ec2','start_ec2','limit_lambda','apply_tags','recommend_review')$c$);
 SELECT pg_temp.add_check('policies', 'policies_risk_level_check',
     $c$risk_level IN ('LOW','MEDIUM','HIGH')$c$);
 SELECT pg_temp.add_check('cost_records', 'cost_records_nonnegative_check',
