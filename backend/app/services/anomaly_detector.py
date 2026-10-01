@@ -20,6 +20,15 @@ INACTIVE_STATES = ["terminated", "deleted"]
 # samples before a stop would keep re-raising "idle" for a stopped instance.
 MAX_SAMPLE_AGE = timedelta(minutes=30)
 PRIMARY_METRIC = {"ec2": "CPUUtilization", "lambda": "Invocations"}
+# Metric-behaviour anomalies (as opposed to state/metadata rules). They clear
+# when the behaviour stops; see _resolve_quiet.
+STATISTICAL_TYPES = ["ml_behavioral_anomaly", "statistical_anomaly", "unusual_cpu_spike"]
+BEHAVIORAL_TYPES = ["runaway_lambda"] + STATISTICAL_TYPES
+# An active behavioural anomaly is re-stamped (detected_at) every cycle it is
+# still seen. Resolve only after it has gone unseen this long *and* the current
+# cycle evaluated as normal, so one quiet sample does not flap it.
+BEHAVIORAL_CLEAR_WINDOW = timedelta(minutes=30)
+_IN_CHUNK = 200
 
 
 def _num(value, default=0.0):
@@ -41,6 +50,10 @@ class AnomalyDetectorService:
     async def run(self):
         logger.info("Starting Anomaly Detection cycle...")
         pool = get_pool()
+        try:
+            await asyncio.to_thread(self.resolve_inactive_resources)
+        except Exception:
+            logger.exception("Could not resolve anomalies of terminated/deleted resources")
         resources = await asyncio.to_thread(
             fetch_all,
             lambda: self.db.table("resources")
@@ -86,8 +99,9 @@ class AnomalyDetectorService:
             self._apply_rule(resource_id, "unused_volume", self._unused_volume(resource), detected_at)
 
         if resource_type == "ec2" and resource.get("state") != "running":
-            # Idle only has meaning for a running instance.
+            # Idle and behaviour only have meaning for a running instance.
             self._resolve_cleared(resource_id, "idle_compute", detected_at)
+            self._resolve_types(resource_id, BEHAVIORAL_TYPES, detected_at)
             return
         if not records:
             return
@@ -115,10 +129,16 @@ class AnomalyDetectorService:
         if runaway["is_anomaly"]:
             self._record_anomaly(resource_id, runaway, detected_at, runaway.get("features") or {})
             return
+        if resource_type == "lambda":
+            self._resolve_quiet(resource_id, ["runaway_lambda"], now)
 
         result = self._statistical(df, resource_type)
         if result.get("is_anomaly"):
             self._record_anomaly(resource_id, result, detected_at, result.pop("_features", {}))
+            flagged = result.get("anomaly_type")
+            self._resolve_quiet(resource_id, [t for t in STATISTICAL_TYPES if t != flagged], now)
+        else:
+            self._resolve_quiet(resource_id, STATISTICAL_TYPES, now)
 
     def _statistical(self, df: pd.DataFrame, resource_type: str) -> dict:
         """Cold-start gate: Z-score -> EWMA -> Isolation Forest by sample count."""
@@ -195,6 +215,56 @@ class AnomalyDetectorService:
         )
         if res.data:
             logger.info("Resolved cleared %s anomaly for resource %s", anomaly_type, resource_id)
+
+    def _resolve_types(self, resource_id: str, anomaly_types: list, now_iso: str) -> None:
+        res = (
+            self.db.table("anomalies")
+            .update({"status": "resolved", "resolved_at": now_iso})
+            .eq("resource_id", resource_id)
+            .in_("anomaly_type", anomaly_types)
+            .eq("status", "active")
+            .execute()
+        )
+        if res.data:
+            logger.info("Resolved %s anomalies for resource %s", len(res.data), resource_id)
+
+    def _resolve_quiet(self, resource_id: str, anomaly_types: list, now: datetime) -> None:
+        """Resolve behavioural anomalies not re-observed within the clear window."""
+        if not anomaly_types:
+            return
+        res = (
+            self.db.table("anomalies")
+            .update({"status": "resolved", "resolved_at": now.isoformat()})
+            .eq("resource_id", resource_id)
+            .in_("anomaly_type", anomaly_types)
+            .eq("status", "active")
+            .lt("detected_at", (now - BEHAVIORAL_CLEAR_WINDOW).isoformat())
+            .execute()
+        )
+        if res.data:
+            logger.info("Resolved %s cleared behavioural anomalies for resource %s", len(res.data), resource_id)
+
+    def resolve_inactive_resources(self) -> int:
+        """Terminated/deleted resources are skipped by detection, so nothing
+        would ever clear their anomalies; close them here."""
+        gone = fetch_all(
+            lambda: self.db.table("resources").select("id").in_("state", INACTIVE_STATES).order("id")
+        )
+        ids = [r["id"] for r in gone]
+        now_iso = datetime.now(timezone.utc).isoformat()
+        resolved = 0
+        for i in range(0, len(ids), _IN_CHUNK):
+            res = (
+                self.db.table("anomalies")
+                .update({"status": "resolved", "resolved_at": now_iso})
+                .in_("resource_id", ids[i:i + _IN_CHUNK])
+                .eq("status", "active")
+                .execute()
+            )
+            resolved += len(res.data or [])
+        if resolved:
+            logger.info("Resolved %s anomalies of terminated/deleted resources", resolved)
+        return resolved
 
     def _record_anomaly(self, resource_id: str, result: dict, detected_at: str, features: dict):
         anomaly_type = result.get("anomaly_type", "unknown")
