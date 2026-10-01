@@ -15,8 +15,8 @@ fi
 
 INSTANCE_IDS=$(cat .demo_instances)
 
-echo "🗑️ Terminating Demo EC2 Instances: $INSTANCE_IDS"
-aws ec2 terminate-instances --instance-ids $INSTANCE_IDS $ENDPOINT_ARG > /dev/null
+echo "🗑️ Stopping Demo EC2 Instances: $INSTANCE_IDS"
+aws ec2 stop-instances --instance-ids $INSTANCE_IDS $ENDPOINT_ARG > /dev/null
 
 echo "🗑️ Deleting Demo Lambda Function..."
 aws lambda delete-function --function-name CloudSentry-Demo-Lambda $ENDPOINT_ARG > /dev/null 2>&1 || true

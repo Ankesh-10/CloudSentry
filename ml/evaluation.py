@@ -1,7 +1,7 @@
-import os
-import sys
 import json
 import logging
+import os
+import tempfile
 from sklearn.metrics import classification_report, precision_score, recall_score, f1_score
 from ml.synthetic.generator import generate_from_scenario
 from ml.features import build_training_dataset
@@ -31,31 +31,23 @@ def evaluate_scenario(scenario_file: str):
     # Align labels with features (first 288 points were dropped by feature builder)
     labels = labels.loc[features_df.index]
     
-    # 3. Train model on normal data (first 1000 points)
-    # We assume the anomaly starts later in the series
-    train_size = min(1000, len(features_df) // 2)
+    # 3. Train on the first half, score only the held-out second half, in a
+    # temporary directory so evaluation never overwrites production models.
+    train_size = len(features_df) // 2
     train_features = features_df.iloc[:train_size]
-    
-    trainer = ModelTrainer()
-    success = trainer.train_isolation_forest(train_features, resource_type)
-    if not success:
-        logger.error("Failed to train model.")
-        return
-        
-    # 4. Run inference on all data
-    engine = InferenceEngine()
-    engine.models_dir = trainer.models_dir # ensure they point to same dir
-    
-    predictions = []
-    
-    # Batch predict using the loaded model directly to save time, 
-    # instead of doing it row-by-row via the engine wrapper which is designed for online inference
-    model = engine._load_model(resource_type)
-    preds = model.predict(features_df)
-    
-    for p in preds:
-        predictions.append(p == -1)
-        
+    holdout = features_df.iloc[train_size:]
+    labels = labels.iloc[train_size:]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        trainer = ModelTrainer(models_dir=tmp)
+        if not trainer.train_isolation_forest(train_features, resource_type):
+            logger.error("Failed to train model.")
+            return None
+        model = InferenceEngine(models_dir=tmp)._load_model(resource_type)
+        # Same decision rule as production InferenceEngine.predict().
+        decisions = model.decision_function(holdout)
+    predictions = [d < settings.ML_IF_DECISION_THRESHOLD for d in decisions]
+
     # 5. Evaluate
     precision = precision_score(labels, predictions, zero_division=0)
     recall = recall_score(labels, predictions, zero_division=0)
@@ -66,6 +58,7 @@ def evaluate_scenario(scenario_file: str):
     logger.info(f"Recall:    {recall:.2f} (Target: >= 0.70)")
     logger.info(f"F1 Score:  {f1:.2f} (Target: >= 0.72)")
     print(classification_report(labels, predictions, target_names=["Normal", "Anomaly"], zero_division=0))
+    return {"precision": precision, "recall": recall, "f1": f1}
 
 def main():
     scenarios = ["idle_ec2.json", "runaway_lambda.json"]

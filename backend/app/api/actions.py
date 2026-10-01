@@ -1,72 +1,111 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
-from typing import List
-from backend.app.schemas.models import Action
-from backend.app.db.supabase_client import get_supabase_client
-from backend.app.services.action_runner import ActionRunner
-from backend.app.auth import get_current_user
-from pydantic import BaseModel
 from datetime import datetime, timezone
+from functools import lru_cache
+from typing import List, Literal, Optional
+from uuid import UUID
 
-router = APIRouter(dependencies=[Depends(get_current_user)])
-db = get_supabase_client()
-runner = ActionRunner()
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from pydantic import BaseModel
+
+from backend.app.auth import actor_label, require_operator
+from backend.app.db.supabase_client import get_supabase_client
+from backend.app.schemas.models import Action
+from backend.app.services.action_runner import REVERSIBLE, ActionRunner
+
+router = APIRouter()
+
+ActionStatus = Literal[
+    "pending", "pending_approval", "approved", "rejected", "executing", "completed", "failed", "rolled_back"
+]
+
+
+@lru_cache(maxsize=1)
+def get_runner() -> ActionRunner:
+    return ActionRunner()
+
 
 class ActionApproval(BaseModel):
     approved: bool
-    user_id: str
+
+
+def _get(action_id: UUID) -> dict:
+    res = get_supabase_client().table("optimization_actions").select("*").eq("id", str(action_id)).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Action not found")
+    return res.data[0]
+
+
+# Handlers are sync `def`: supabase-py is blocking, so FastAPI runs them in its
+# threadpool instead of on the event loop.
 
 @router.get("/", response_model=List[Action])
-async def list_actions(status: str = None):
-    query = db.table("optimization_actions").select("*")
+def list_actions(
+    status: Optional[ActionStatus] = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    query = get_supabase_client().table("optimization_actions").select("*")
     if status:
         query = query.eq("status", status)
-        
-    res = query.order("created_at", desc=True).execute()
-    return res.data
+    return query.order("created_at", desc=True).range(offset, offset + limit - 1).execute().data
 
-@router.post("/{id}/approve")
-async def approve_action(id: str, payload: ActionApproval, background_tasks: BackgroundTasks):
-    """
-    Approves or rejects an action. If approved, it is queued for execution.
-    """
-    res = db.table("optimization_actions").select("*").eq("id", id).execute()
-    if not res.data:
-        raise HTTPException(status_code=404, detail="Action not found")
-        
-    action = res.data[0]
-    if action["status"] not in ["pending", "pending_approval"]:
-        raise HTTPException(status_code=400, detail="Action is not pending")
-        
-    now = datetime.now(timezone.utc).isoformat()
+
+@router.get("/{action_id}", response_model=Action)
+def get_action(action_id: UUID):
+    return _get(action_id)
+
+
+@router.post("/{action_id}/approve", response_model=Action)
+def approve_action(
+    action_id: UUID,
+    payload: ActionApproval,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(require_operator),
+):
+    action = _get(action_id)
+    if action["status"] not in ("pending", "pending_approval"):
+        raise HTTPException(status_code=409, detail="Action is not awaiting approval")
+
     new_status = "approved" if payload.approved else "rejected"
-    
-    update_res = db.table("optimization_actions").update({
-        "status": new_status,
-        "approved_by": payload.user_id,
-        "approved_at": now
-    }).eq("id", id).execute()
-    
-    if payload.approved:
-        # Trigger execution in the background
-        background_tasks.add_task(runner.execute_action, id)
-        
-    return update_res.data[0]
-
-@router.post("/{id}/rollback")
-async def rollback_action(id: str, background_tasks: BackgroundTasks, user_id: str = "API_USER"):
-    """
-    Triggers a rollback for a completed reversible action.
-    """
-    res = db.table("optimization_actions").select("*").eq("id", id).execute()
+    # Compare-and-swap on the status we read: a concurrent approve/execute wins once.
+    res = (
+        get_supabase_client().table("optimization_actions")
+        .update({
+            "status": new_status,
+            "approved_by": actor_label(user),
+            "approved_at": datetime.now(timezone.utc).isoformat(),
+        })
+        .eq("id", str(action_id))
+        .eq("status", action["status"])
+        .execute()
+    )
     if not res.data:
-        raise HTTPException(status_code=404, detail="Action not found")
-        
-    action = res.data[0]
+        raise HTTPException(status_code=409, detail="Action changed concurrently; reload and retry")
+
+    if payload.approved:
+        background_tasks.add_task(get_runner().execute_action, str(action_id), actor_label(user))
+    return res.data[0]
+
+
+@router.post("/{action_id}/execute", status_code=202)
+def execute_action(action_id: UUID, background_tasks: BackgroundTasks, user: dict = Depends(require_operator)):
+    action = _get(action_id)
+    runnable = action["status"] == "approved" or (
+        action["status"] == "pending" and not action.get("requires_approval")
+    )
+    if not runnable:
+        raise HTTPException(status_code=409, detail="Action cannot be executed from its current status")
+    background_tasks.add_task(get_runner().execute_action, str(action_id), actor_label(user))
+    return {"status": "queued", "id": str(action_id)}
+
+
+@router.post("/{action_id}/rollback", status_code=202)
+def rollback_action(action_id: UUID, background_tasks: BackgroundTasks, user: dict = Depends(require_operator)):
+    action = _get(action_id)
     if action["status"] != "completed":
-        raise HTTPException(status_code=400, detail="Can only rollback completed actions")
-        
+        raise HTTPException(status_code=409, detail="Can only roll back completed actions")
     if action.get("rollback_action_id"):
-        raise HTTPException(status_code=400, detail="Action has already been rolled back")
-        
-    background_tasks.add_task(runner.rollback_action, id, user_id)
-    return {"message": "Rollback initiated"}
+        raise HTTPException(status_code=409, detail="Action has already been rolled back")
+    if action["action_type"] not in REVERSIBLE:
+        raise HTTPException(status_code=409, detail="Action type is not reversible")
+    background_tasks.add_task(get_runner().rollback_action, str(action_id), actor_label(user))
+    return {"status": "queued", "id": str(action_id)}

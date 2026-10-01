@@ -165,6 +165,7 @@ cython_debug/
 models/*.pkl
 *.pkl
 md/
+graphify-out/
 
 # Node
 node_modules/

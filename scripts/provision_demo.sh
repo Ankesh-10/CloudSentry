@@ -13,15 +13,22 @@ fi
 
 echo "🚀 Provisioning CloudSentry Demo Environment..."
 
-# 1. Spin up 3 EC2 instances (t2.micro)
-# Using a dummy AMI for mock environments, or falling back to an Amazon Linux AMI format
-AMI_ID="ami-12c6146b"
+# 1. Spin up 1 EC2 instance (t2.micro). Real AWS: latest Amazon Linux 2. Mock: dummy AMI.
+if [ -n "$AWS_ENDPOINT_URL" ]; then
+    AMI_ID="ami-12c6146b"
+else
+    AMI_ID=$(aws ec2 describe-images \
+        --owners amazon \
+        --filters "Name=name,Values=amzn2-ami-hvm-*-x86_64-gp2" "Name=state,Values=available" \
+        --query "sort_by(Images, &CreationDate)[-1].ImageId" \
+        --output text)
+fi
 
 INSTANCE_IDS=$(aws ec2 run-instances \
-    --image-id $AMI_ID \
-    --count 3 \
+    --image-id "$AMI_ID" \
+    --count 1 \
     --instance-type t2.micro \
-    --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=CloudSentry-Demo-EC2},{Key=Environment,Value=Demo}]' \
+    --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=CloudSentry-Demo-EC2},{Key=Environment,Value=Demo},{Key=ManagedBy,Value=CloudSentry}]' \
     --query 'Instances[*].InstanceId' \
     --output text $ENDPOINT_ARG)
 

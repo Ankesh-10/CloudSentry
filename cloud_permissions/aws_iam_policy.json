@@ -8,8 +8,14 @@
                 "ec2:DescribeInstances",
                 "ec2:DescribeVolumes",
                 "lambda:ListFunctions",
+                "lambda:GetFunction",
+                "lambda:GetFunctionConcurrency",
+                "lambda:ListTags",
                 "s3:ListAllMyBuckets",
-                "rds:DescribeDBInstances"
+                "s3:GetBucketLocation",
+                "s3:GetBucketTagging",
+                "rds:DescribeDBInstances",
+                "rds:ListTagsForResource"
             ],
             "Resource": "*"
         },
@@ -17,7 +23,8 @@
             "Sid": "AllowTelemetryCollection",
             "Effect": "Allow",
             "Action": [
-                "cloudwatch:GetMetricData"
+                "cloudwatch:GetMetricData",
+                "cloudwatch:ListMetrics"
             ],
             "Resource": "*"
         },
@@ -28,13 +35,19 @@
                 "ec2:StopInstances",
                 "ec2:StartInstances",
                 "ec2:CreateTags",
+                "ec2:DeleteTags",
                 "lambda:PutFunctionConcurrency",
-                "lambda:TagResource"
+                "lambda:DeleteFunctionConcurrency",
+                "lambda:TagResource",
+                "s3:PutBucketTagging",
+                "rds:AddTagsToResource"
             ],
-            "Resource": [
-                "arn:aws:ec2:*:*:instance/*",
-                "arn:aws:lambda:*:*:function:*"
-            ]
+            "Resource": "*",
+            "Condition": {
+                "StringEquals": {
+                    "aws:RequestedRegion": "us-east-1"
+                }
+            }
         }
     ]
 }

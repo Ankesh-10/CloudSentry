@@ -1,36 +1,77 @@
-from fastapi import APIRouter, HTTPException
-from typing import List
-from backend.app.schemas.models import Resource
+from typing import List, Optional
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
+
+from backend.app.auth import require_operator
+from backend.app.db.asyncpg_pool import get_pool
 from backend.app.db.supabase_client import get_supabase_client
-from backend.app.services.discovery import DiscoveryService
+from backend.app.schemas.models import Resource
+from backend.app.services.discovery import DiscoveryError, DiscoveryService
 
 router = APIRouter()
-db = get_supabase_client()
+
 
 @router.get("/", response_model=List[Resource])
-async def list_resources():
-    res = db.table("resources").select("*").execute()
-    return res.data
+def list_resources(
+    resource_type: Optional[str] = Query(default=None, max_length=30),
+    include_deleted: bool = False,
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+):
+    query = get_supabase_client().table("resources").select("*")
+    if resource_type:
+        query = query.eq("resource_type", resource_type)
+    if not include_deleted:
+        query = query.not_.in_("state", ["terminated", "deleted"])
+    return query.order("name").range(offset, offset + limit - 1).execute().data
 
-@router.get("/{id}")
-async def get_resource(id: str):
-    res = db.table("resources").select("*").eq("id", id).execute()
+
+def _resource_bundle(rid: str) -> dict:
+    db = get_supabase_client()
+    res = db.table("resources").select("*").eq("id", rid).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Resource not found")
-        
-    # In a full implementation, we would also fetch metrics_24h, anomalies, and actions here
-    return {
-        "resource": res.data[0],
-        "metrics_24h": [],
-        "anomalies": [],
-        "actions": []
-    }
+    anomalies = db.table("anomalies").select("*").eq("resource_id", rid).order("detected_at", desc=True).limit(20).execute()
+    actions = db.table("optimization_actions").select("*").eq("resource_id", rid).order("created_at", desc=True).limit(20).execute()
+    return {"resource": res.data[0], "anomalies": anomalies.data or [], "actions": actions.data or []}
+
+
+@router.get("/{resource_id}")
+async def get_resource(resource_id: UUID):
+    rid = str(resource_id)
+    bundle = await run_in_threadpool(_resource_bundle, rid)
+
+    metrics_24h = None
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            records = await conn.fetch(
+                """
+                SELECT time, metric_name, value, unit
+                FROM resource_metrics
+                WHERE resource_id = $1 AND time > NOW() - INTERVAL '24 hours'
+                ORDER BY time DESC
+                LIMIT 5000
+                """,
+                resource_id,
+            )
+        metrics_24h = [dict(r) for r in records]
+    except RuntimeError:
+        # Pool not initialised: report "unavailable" (null), not "no data" ([]).
+        metrics_24h = None
+
+    return {**bundle, "metrics_24h": metrics_24h}
+
 
 @router.post("/discover")
-async def trigger_discovery():
+def trigger_discovery(user: dict = Depends(require_operator)):
     try:
-        service = DiscoveryService()
-        service.run()
-        return {"status": "success"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        result = DiscoveryService().run()
+    except DiscoveryError as e:
+        # Partial success: some resource types failed at the provider.
+        raise HTTPException(status_code=502, detail={"message": "Discovery partially failed", "result": e.summary})
+    except Exception:
+        raise HTTPException(status_code=500, detail="Discovery failed")
+    return {"status": "success", "result": result}

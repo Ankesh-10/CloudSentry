@@ -34,13 +34,13 @@ INSERT INTO policies (name, enabled, resource_type, anomaly_type, conditions, ac
     100
 ),
 (
-    'Require approval for unused EBS volume deletion',
+    'Recommend unused EBS volumes (never auto-delete)',
     true,
     'ebs',
     'unused_volume',
     '{"AND": [{"field": "resource.state", "op": "eq", "value": "available"}]}',
-    'delete_ebs_volume',
-    'HIGH',
+    'apply_tags',
+    'MEDIUM',
     true,
     100
 );

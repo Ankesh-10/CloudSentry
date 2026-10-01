@@ -1,258 +1,186 @@
-import os
-import pytest
+"""End-to-end: discovery -> telemetry -> detection -> policy -> execute ->
+verify -> rollback, with real service code against moto AWS and an in-memory
+PostgREST fake. Nothing in the pipeline under test is mocked out."""
+import time
+from datetime import datetime, timedelta, timezone
+
 import boto3
-import asyncio
-from unittest.mock import patch, MagicMock, AsyncMock
-from datetime import datetime, timezone, timedelta
+import pytest
 from fastapi.testclient import TestClient
+from jose import jwt
 from moto import mock_aws
 
-# Set mock AWS credentials before importing app modules
-os.environ["AWS_ACCESS_KEY_ID"] = "testing"
-os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
-os.environ["AWS_SECURITY_TOKEN"] = "testing"
-os.environ["AWS_SESSION_TOKEN"] = "testing"
-os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
-os.environ["GLOBAL_AUTOMATION_ENABLED"] = "true"
-os.environ["DRY_RUN_MODE"] = "false"
-
 from backend.app.main import app
-from backend.app.services.discovery import DiscoveryService
-from backend.app.services.telemetry import TelemetryService
-from backend.app.services.anomaly_detector import AnomalyDetectorService
-from backend.app.services.policy_engine import PolicyEngine
+from backend.app.services import runtime_config
 from backend.app.services.action_runner import ActionRunner
-from backend.app.config import settings
+from backend.app.services.anomaly_detector import AnomalyDetectorService
+from backend.app.services.discovery import DiscoveryService
+from backend.app.services.policy_engine import PolicyEngine
+from backend.app.services import telemetry as telemetry_mod
 
-@pytest.fixture(scope="module")
-def test_client():
-    with TestClient(app) as client:
-        yield client
+NOW = datetime.now(timezone.utc)
+
+
+def _auth(sub):
+    tok = jwt.encode({"sub": sub, "aud": "authenticated", "role": "authenticated", "exp": int(time.time()) + 600},
+                     "test-secret-key-for-hs256", algorithm="HS256")
+    return {"Authorization": f"Bearer {tok}"}
+
+
+class _FakeConn:
+    def __init__(self, sink):
+        self.sink = sink
+
+    async def executemany(self, sql, records):
+        assert "ON CONFLICT" in sql
+        for rec in records:
+            self.sink.add(rec)
+
+
+class _FakePool:
+    def __init__(self, sink):
+        self.sink = sink
+
+    def acquire(self):
+        pool = self
+
+        class _Ctx:
+            async def __aenter__(self_inner):
+                return _FakeConn(pool.sink)
+
+            async def __aexit__(self_inner, *a):
+                return False
+        return _Ctx()
+
 
 @pytest.fixture
-def mock_cloud_env():
+def world(fake_db):
     with mock_aws():
         ec2 = boto3.client("ec2", region_name="us-east-1")
-        cloudwatch = boto3.client("cloudwatch", region_name="us-east-1")
-        
-        # Create a mock instance
-        res = ec2.run_instances(
-            ImageId="ami-12c6146b",
-            MinCount=1,
-            MaxCount=1,
-            InstanceType="t2.micro",
-            TagSpecifications=[
-                {'ResourceType': 'instance', 'Tags': [{'Key': 'Name', 'Value': 'IntegrationTestInstance'}]}
-            ]
-        )
-        instance_id = res['Instances'][0]['InstanceId']
-        
-        # Seed CloudWatch with an anomaly (Huge CPU spike)
-        now = datetime.now(timezone.utc)
-        cloudwatch.put_metric_data(
-            Namespace="AWS/EC2",
-            MetricData=[
-                {
-                    "MetricName": "CPUUtilization",
-                    "Dimensions": [{"Name": "InstanceId", "Value": instance_id}],
-                    "Timestamp": now - timedelta(minutes=5),
-                    "Value": 99.9, # Anomaly level CPU
-                    "Unit": "Percent"
-                }
-            ]
-        )
-        yield {"instance_id": instance_id}
+        iid = ec2.run_instances(
+            ImageId="ami-12c6146b", MinCount=1, MaxCount=1, InstanceType="t2.micro",
+            TagSpecifications=[{"ResourceType": "instance", "Tags": [{"Key": "Project", "Value": "demo"},
+                                                                     {"Key": "Owner", "Value": "me"}]}],
+        )["Instances"][0]["InstanceId"]
+        fake_db.rows("policies").append({
+            "id": "p-idle", "name": "Auto-stop idle EC2", "enabled": True, "resource_type": "ec2",
+            "anomaly_type": "idle_compute", "action_type": "stop_ec2", "risk_level": "MEDIUM",
+            "requires_approval": False, "priority": 100,
+            "conditions": {"AND": [
+                {"field": "anomaly.idle_score", "op": "gte", "value": 0.80},
+                {"field": "anomaly.confidence", "op": "gte", "value": 0.75},
+                {"field": "resource.protected", "op": "eq", "value": False},
+            ]},
+        })
+        yield {"db": fake_db, "iid": iid, "ec2": ec2}
 
-@pytest.fixture
-def mock_db():
-    """
-    Provides a comprehensive mocked database that fakes Supabase chains
-    so the pipeline can run without actual credentials.
-    """
-    class MockExecute:
-        def __init__(self, data=None, count=0):
-            self.data = data or []
-            self.count = count
 
-    class MockQuery:
-        def __init__(self, table_name, db_state):
-            self.table_name = table_name
-            self.db_state = db_state
-            
-        def select(self, *args, **kwargs): return self
-        def insert(self, payload):
-            if isinstance(payload, dict): payload = [payload]
-            for p in payload:
-                if 'id' not in p: p['id'] = f"mock-{self.table_name}-id"
-                self.db_state[self.table_name].append(p)
-            self.last_payload = payload
-            return self
-        def upsert(self, payload, *args, **kwargs):
-            return self.insert(payload)
-        def update(self, payload):
-            if self.db_state[self.table_name]:
-                self.db_state[self.table_name][0].update(payload)
-            self.last_payload = self.db_state[self.table_name]
-            return self
-        def eq(self, *args): return self
-        def neq(self, *args): return self
-        def gte(self, *args): return self
-        def in_(self, *args): return self
-        def limit(self, *args): return self
-        def order(self, *args, **kwargs): return self
-        
-        def execute(self):
-            # Special case for specific tables to return joined relations
-            if self.table_name == "anomalies" and self.db_state[self.table_name]:
-                for a in self.db_state[self.table_name]:
-                    a["resources"] = self.db_state["resources"][0] if self.db_state["resources"] else {"id": "mock-res", "resource_type": "ec2", "provider_id": "i-mock", "state": "running", "protected": False}
-            elif self.table_name == "optimization_actions" and self.db_state[self.table_name]:
-                for a in self.db_state[self.table_name]:
-                    a["resources"] = self.db_state["resources"][0] if self.db_state["resources"] else {"id": "mock-res", "resource_type": "ec2", "provider_id": "i-mock", "state": "running", "protected": False}
-                    
-            if hasattr(self, 'last_payload'):
-                ret = self.last_payload
-                delattr(self, 'last_payload')
-                return MockExecute(data=ret, count=len(ret))
-            
-            return MockExecute(data=self.db_state[self.table_name], count=len(self.db_state[self.table_name]))
+def _state(world):
+    return world["ec2"].describe_instances(InstanceIds=[world["iid"]])["Reservations"][0]["Instances"][0]["State"]["Name"]
 
-    class MockClient:
-        def __init__(self):
-            self.db_state = {
-                "cloud_accounts": [{"id": "mock-acc-id"}],
-                "resources": [],
-                "resource_metrics": [],
-                "anomalies": [],
-                "policies": [{
-                    "id": "mock-policy-id",
-                    "name": "Integration Test Stop Policy",
-                    "enabled": True,
-                    "resource_type": "ec2",
-                    "anomaly_type": "idle_compute",
-                    "conditions": {"field": "anomaly.score", "op": "gt", "value": 0.5},
-                    "action_type": "stop_ec2",
-                    "risk_level": "LOW",
-                    "requires_approval": False
-                }],
-                "optimization_actions": [],
-                "audit_logs": []
-            }
-        
-        def table(self, name):
-            return MockQuery(name, self.db_state)
-
-    return MockClient()
 
 @pytest.mark.asyncio
-@patch("backend.app.services.discovery.get_supabase_client")
-@patch("backend.app.services.telemetry.get_supabase_client")
-@patch("backend.app.services.anomaly_detector.get_supabase_client")
-@patch("backend.app.services.policy_engine.get_supabase_client")
-@patch("backend.app.services.safety_layer.get_supabase_client")
-@patch("backend.app.services.action_runner.get_supabase_client")
-@patch("backend.app.services.audit_logger.get_supabase_client")
-@patch("backend.app.api.actions.db")
-@patch("backend.app.api.actions.runner.db")
-async def test_end_to_end_pipeline(
-    mock_runner_db, mock_api_db,
-    mock_audit_db, mock_action_db, mock_safety_db, mock_policy_db, 
-    mock_anomaly_db, mock_telemetry_db, mock_discovery_db, 
-    test_client, mock_cloud_env, mock_db
-):
-    """
-    Simulates the entire APScheduler pipeline running sequentially using Moto and a Mocked DB.
-    """
-    # Inject our mock database into all services
-    for mock_target in [mock_runner_db, mock_api_db, mock_audit_db, mock_action_db, mock_safety_db, mock_policy_db, mock_anomaly_db, mock_telemetry_db, mock_discovery_db]:
-        mock_target.return_value = mock_db
-        
-    mock_api_db.table = mock_db.table # FastApi instance
-
-    instance_id = mock_cloud_env["instance_id"]
-    
-    settings.GLOBAL_AUTOMATION_ENABLED = True
-    settings.DRY_RUN_MODE = False
+async def test_full_loop_idle_ec2(world, monkeypatch):
+    db = world["db"]
 
     # 1. Discovery
-    discovery = DiscoveryService()
-    discovery.run()
-    
-    assert len(mock_db.db_state["resources"]) > 0
-    assert mock_db.db_state["resources"][0]["provider_id"] == instance_id
-    
-    # Update mock DB resource to have the correct mock ID
-    db_resource_id = mock_db.db_state["resources"][0]["id"]
+    DiscoveryService().run()
+    resource = next(r for r in db.rows("resources") if r["provider_id"] == world["iid"])
 
-    # 2. Telemetry Collection
-    # To avoid asyncpg complexity, we patch get_pool and mock the connection
-    with patch("backend.app.services.telemetry.get_pool") as mock_get_pool:
-        mock_pool = MagicMock()
-        mock_conn = AsyncMock()
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
-        mock_get_pool.return_value = mock_pool
-        
-        telemetry = TelemetryService()
-        await telemetry.run() # Ensure to await the async run method
-        
-        # Verify that copy_records_to_table was called
-        assert mock_conn.copy_records_to_table.called
-        
-        # Manually seed the DB state since we intercepted the db write
-        mock_db.db_state["resource_metrics"].append({
-            "resource_id": db_resource_id,
-            "metric_name": "CPUUtilization",
-            "value": 99.9,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
-        # Add missing DB default fields to our mock resource
-        mock_db.db_state["resources"][0]["protected"] = False
+    # 2. Telemetry: CloudWatch -> resource_metrics (idempotent insert path).
+    cw = boto3.client("cloudwatch", region_name="us-east-1")
+    cw.put_metric_data(Namespace="AWS/EC2", MetricData=[{
+        "MetricName": "CPUUtilization", "Dimensions": [{"Name": "InstanceId", "Value": world["iid"]}],
+        "Timestamp": NOW - timedelta(minutes=10), "Value": 0.5, "Unit": "Percent"}])
+    samples = set()
+    monkeypatch.setattr(telemetry_mod, "get_pool", lambda: _FakePool(samples))
+    await telemetry_mod.TelemetryService().run()
+    assert any(s[1] == resource["id"] and s[2] == "CPUUtilization" for s in samples)
 
-    # 3. Anomaly Detection
-    # Since Z-Score needs 500 historical points, the real detector will just return.
-    # We will manually trigger the anomaly creation to simulate a detected anomaly.
-    with patch("backend.app.services.anomaly_detector.AnomalyDetectorService.run") as mock_detector:
-        mock_db.db_state["anomalies"].append({
-            "id": "mock-anomaly-id",
-            "resource_id": db_resource_id,
-            "anomaly_type": "idle_compute",
-            "anomaly_score": 0.99,
-            "confidence": 0.9,
-            "status": "active",
-            "features_snapshot": {"rolling_avg_cpu_24h": 0.5}
-        })
-        detector = AnomalyDetectorService()
-        # If it's async, we should await it (scheduler might wrap it, but direct call needs await if async)
-        if asyncio.iscoroutinefunction(detector.run) or isinstance(mock_detector, AsyncMock):
-            await detector.run()
-        else:
-            detector.run()
+    # 3. Detection over a full idle window (collected history + this cycle).
+    history = []
+    for i in range(36, 0, -1):
+        t = NOW - timedelta(minutes=5 * i)
+        history.append({"time": t, "metric_name": "CPUUtilization", "value": 0.5})
+        history.append({"time": t, "metric_name": "NetworkIn", "value": 50.0})
+    resource_row = dict(resource)
+    AnomalyDetectorService().process_resource(resource_row, history, NOW)
+    anomalies = [a for a in db.rows("anomalies") if a["status"] == "active"]
+    assert [a["anomaly_type"] for a in anomalies] == ["idle_compute"]  # tagged, so no untagged anomaly
 
-    # 4. Policy Engine
-    policy_engine = PolicyEngine()
-    policy_engine.evaluate_all()
-    
-    assert len(mock_db.db_state["optimization_actions"]) > 0
-    action_id = mock_db.db_state["optimization_actions"][0]["id"]
-    assert mock_db.db_state["optimization_actions"][0]["action_type"] == "stop_ec2"
-    
-    # 5. API Approval
-    # The policy engine creates the action as 'pending'
-    response = test_client.post(f"/api/v1/actions/{action_id}/approve", json={"approved": True, "user_id": "TEST_USER"})
-    assert response.status_code == 200
-    assert mock_db.db_state["optimization_actions"][0]["status"] == "approved"
-    
-    # 6. Action Execution (Triggered via API background task, but we will call it manually to test the service)
+    # 4. Policy -> a pending proposal, even though automation is still off.
+    resource["first_seen"] = (NOW - timedelta(hours=5)).isoformat()
+    assert PolicyEngine().evaluate_all() == 1
+    action = db.rows("optimization_actions")[0]
+    assert action["status"] == "pending" and action["estimated_savings_usd"] > 0
+
     runner = ActionRunner()
-    success = runner.execute_action(action_id)
-    assert success is True
-    
-    # Verify EC2 was stopped in mock AWS
-    ec2 = boto3.client("ec2", region_name="us-east-1")
-    inst_state = ec2.describe_instances(InstanceIds=[instance_id])['Reservations'][0]['Instances'][0]['State']['Name']
-    assert inst_state == 'stopped'
-    
-    # Verify Audit Logs
-    assert len(mock_db.db_state["audit_logs"]) >= 2
-    assert mock_db.db_state["audit_logs"][0]["event_type"] == "action_started"
-    assert mock_db.db_state["audit_logs"][1]["event_type"] == "action_completed"
+    # Kill-switch off: the scheduled executor does nothing.
+    assert runner.execute_pending_auto() == 0
+    assert _state(world) == "running"
+
+    # 5. Two operators enable live automation through the API: one requests,
+    #    a different one confirms.
+    with TestClient(app) as client:
+        op = _auth("operator-1")
+        op2 = _auth("operator-2")
+        for key, value in (("DRY_RUN_MODE", "false"), ("GLOBAL_AUTOMATION_ENABLED", "true")):
+            body = {"key": key, "value": value}
+            assert client.patch("/api/v1/system/config", json=body, headers=op).status_code == 202
+            assert client.patch("/api/v1/system/config", json=body, headers=op2).status_code == 200
+
+        # 6. Scheduled executor + verifier close the loop.
+        assert runner.execute_pending_auto() == 1
+        assert _state(world) == "stopped"
+        runner.verify_pending()
+        action = db.rows("optimization_actions")[0]
+        assert action["status"] == "completed" and action["dry_run"] is False
+        assert db.rows("anomalies")[0]["status"] == "resolved"
+
+        # No re-proposal for the resolved anomaly / stopped instance.
+        assert PolicyEngine().evaluate_all() == 0
+
+        # 7. Non-operator cannot roll back; operator can.
+        assert client.post(f"/api/v1/actions/{action['id']}/rollback", headers=_auth("viewer")).status_code == 403
+        res = client.post(f"/api/v1/actions/{action['id']}/rollback", headers=op)
+        assert res.status_code == 202
+    runner.verify_pending()
+    assert _state(world) == "running"
+    assert db.rows("optimization_actions")[0]["status"] == "rolled_back"
+
+    events = [l["event_type"] for l in db.rows("audit_logs")]
+    for expected in ("config_changed", "action_started", "action_submitted", "action_verified", "rollback_started"):
+        assert expected in events
+    assert any(l["actor"] == "USER:operator-1" for l in db.rows("audit_logs") if l["event_type"] == "rollback_started")
+
+
+def test_approval_flow_and_emergency_stop(world):
+    db = world["db"]
+    DiscoveryService().run()
+    resource = next(r for r in db.rows("resources") if r["provider_id"] == world["iid"])
+    db.rows("optimization_actions").append({
+        "id": "11111111-1111-1111-1111-111111111111", "resource_id": resource["id"], "action_type": "stop_ec2",
+        "risk_level": "HIGH", "status": "pending_approval", "requires_approval": True, "dry_run": True,
+        "created_at": NOW.isoformat()})
+    aid = "11111111-1111-1111-1111-111111111111"
+    runtime_config.set_flag("GLOBAL_AUTOMATION_ENABLED", True, persist=False)
+    runtime_config.set_flag("DRY_RUN_MODE", False, persist=False)
+
+    with TestClient(app) as client:
+        # Scheduled executor must never run an unapproved HIGH-risk action.
+        assert ActionRunner().execute_pending_auto() == 0
+        assert client.post(f"/api/v1/actions/{aid}/approve", json={"approved": True}, headers=_auth("viewer")).status_code == 403
+
+        # Emergency stop by any authenticated user, *then* the operator approves:
+        # the approval is recorded but execution is blocked by the kill-switch.
+        assert client.post("/api/v1/system/emergency-stop", headers=_auth("viewer")).status_code == 200
+        res = client.post(f"/api/v1/actions/{aid}/approve", json={"approved": True}, headers=_auth("operator-1"))
+        assert res.status_code == 200
+        assert res.json()["approved_by"] == "USER:operator-1"
+        # Double approval is a conflict, not a second execution.
+        assert client.post(f"/api/v1/actions/{aid}/approve", json={"approved": True}, headers=_auth("operator-1")).status_code == 409
+
+    assert _state(world) == "running"
+    action = next(a for a in db.rows("optimization_actions") if a["id"] == aid)
+    assert action["status"] == "failed"
+    assert "Kill-switch" in action["post_state"]["result"]
