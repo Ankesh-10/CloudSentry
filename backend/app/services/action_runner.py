@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from backend.app.adapters.factory import get_cloud_adapter
@@ -27,6 +27,13 @@ VERIFY_TIMEOUT_SECONDS = 300
 STALE_CLAIM_SECONDS = 900
 AUTO_TAG_VALUE = "unassigned"
 AUTO_TAG_MARKER = "cloudsentry:auto-tagged"
+# Live state a resource must be in for the action to make sense; checked
+# against the cloud right before the mutating call (the DB copy may be stale).
+EXPECTED_LIVE_STATE = {
+    "stop_ec2": "running",
+    "start_ec2": "stopped",
+}
+EXPIRED_MESSAGE = "Expired: not executed within APPROVAL_TTL_HOURS of being proposed/approved"
 
 
 def _now() -> datetime:
@@ -52,8 +59,57 @@ class ActionRunner:
 
     # ------------------------------------------------------------------ execute
 
+    # ------------------------------------------------------------------- expiry
+
+    def _ttl(self) -> timedelta:
+        return timedelta(hours=settings.APPROVAL_TTL_HOURS)
+
+    def is_expired(self, action: dict) -> bool:
+        """A proposal (or approval) older than the TTL describes a world that
+        may no longer exist; it must be re-proposed, not executed."""
+        status = action.get("status")
+        if status in ("pending", "pending_approval"):
+            ref = _parse_ts(action.get("created_at"))
+        elif status == "approved":
+            ref = _parse_ts(action.get("approved_at")) or _parse_ts(action.get("created_at"))
+        else:
+            return False
+        return ref is not None and _now() - ref > self._ttl()
+
+    def expire(self, action: dict, actor: str = "SYSTEM") -> bool:
+        res = (
+            self.db.table("optimization_actions")
+            .update({"status": "rejected", "post_state": {"result": EXPIRED_MESSAGE}})
+            .eq("id", action["id"])
+            .eq("status", action["status"])
+            .execute()
+        )
+        if res.data:
+            self.audit.log_action(
+                event_type="action_expired",
+                actor=actor,
+                resource_id=action.get("resource_id"),
+                action_id=action["id"],
+                aws_api_call=action.get("action_type"),
+                response_status="rejected",
+                message=EXPIRED_MESSAGE,
+            )
+        return bool(res.data)
+
+    def expire_stale_proposals(self) -> int:
+        cutoff = (_now() - self._ttl()).isoformat()
+        res = (
+            self.db.table("optimization_actions")
+            .select("id, status, resource_id, action_type, created_at, approved_at")
+            .in_("status", ["pending", "pending_approval", "approved"])
+            .lt("created_at", cutoff)
+            .execute()
+        )
+        return sum(1 for row in res.data or [] if self.is_expired(row) and self.expire(row))
+
     def execute_pending_auto(self) -> int:
         """Execute pending actions that do not require approval."""
+        self.expire_stale_proposals()
         runtime_config.refresh_from_db()
         if not runtime_config.automation_enabled():
             return 0
@@ -100,6 +156,11 @@ class ActionRunner:
             logger.error("Action %s has no resource.", action_id)
             return False
 
+        if self.is_expired(action):
+            self.expire(action, actor)
+            logger.warning("Action %s expired before execution", action_id)
+            return False
+
         if not self._claim(action):
             logger.warning("Action %s not claimable from status %s", action_id, action["status"])
             return False
@@ -131,6 +192,13 @@ class ActionRunner:
             self._finish(action_id, resource, action, False, f"Blocked by safety layer: {reason}", actor=actor, blocked=True)
             return False
 
+        # The proposal was made for a specific anomaly; if that has since been
+        # resolved or dismissed (e.g. the idle instance got busy), stand down.
+        stale = self._stale_anomaly_reason(action)
+        if stale:
+            self._finish(action_id, resource, action, False, f"Blocked: {stale}", actor=actor, blocked=True)
+            return False
+
         now = _now().isoformat()
         # The mode in force *now* governs; the row's dry_run is rewritten to the
         # mode actually used so the audit trail is truthful.
@@ -138,6 +206,11 @@ class ActionRunner:
             message = f"Dry run mode: WOULD {action['action_type']} on {resource['provider_id']}"
             self._finish(action_id, resource, action, True, message, executed_at=now, dry=True, actor=actor)
             return True
+
+        live_problem = self._live_state_problem(action, resource)
+        if live_problem:
+            self._finish(action_id, resource, action, False, f"Blocked: {live_problem}", actor=actor, blocked=True)
+            return False
 
         try:
             pre_state = self._capture_pre_state(action, resource)
@@ -189,6 +262,7 @@ class ActionRunner:
             .execute()
         )
         for row in res.data or []:
+            self._release_rollback_link(row["id"])
             self.audit.log_action(
                 event_type="action_failed",
                 actor="SYSTEM",
@@ -256,6 +330,7 @@ class ActionRunner:
                     "status": "failed",
                     "post_state": {"state": observed, "verified": False, "timeout": True},
                 }).eq("id", action["id"]).eq("status", "executing").execute()
+                self._release_rollback_link(action["id"])
                 self.audit.log_action(
                     event_type="action_failed",
                     actor="SYSTEM",
@@ -311,22 +386,51 @@ class ActionRunner:
             logger.error("Action %s is not reversible.", original["action_type"])
             return False
 
+        ok, reason = self.safety.check_rollback(reverse_type, resource["id"])
+        if not ok:
+            logger.warning("Rollback of %s blocked: %s", action_id, reason)
+            self.audit.log_action(
+                event_type="rollback_blocked",
+                actor=user_id,
+                resource_id=resource["id"],
+                action_id=action_id,
+                aws_api_call=reverse_type,
+                response_status="blocked",
+                message=f"Rollback blocked by safety layer: {reason}",
+            )
+            return False
+
         original_was_dry = bool(original.get("dry_run")) or bool((original.get("post_state") or {}).get("dry_run"))
         dry = original_was_dry or runtime_config.dry_run_mode()
         now = _now().isoformat()
-        new_action_res = self.db.table("optimization_actions").insert({
-            "anomaly_id": original.get("anomaly_id"),
-            "resource_id": resource["id"],
-            "action_type": reverse_type,
-            "risk_level": "LOW",
-            "status": "executing",
-            "claimed_at": now,
-            "requires_approval": False,
-            "approved_by": user_id,
-            "approved_at": now,
-            "dry_run": dry,
-            "created_at": now,
-        }).execute()
+        try:
+            new_action_res = self.db.table("optimization_actions").insert({
+                "anomaly_id": original.get("anomaly_id"),
+                "resource_id": resource["id"],
+                "action_type": reverse_type,
+                "risk_level": "LOW",
+                "status": "executing",
+                "claimed_at": now,
+                "requires_approval": False,
+                "approved_by": user_id,
+                "approved_at": now,
+                "dry_run": dry,
+                "created_at": now,
+            }).execute()
+        except Exception:
+            # Most likely uq_actions_one_in_flight: another action of this type
+            # is already in flight for the resource.
+            logger.exception("Could not create rollback action for %s", action_id)
+            self.audit.log_action(
+                event_type="rollback_failed",
+                actor=user_id,
+                resource_id=resource["id"],
+                action_id=action_id,
+                aws_api_call=reverse_type,
+                response_status="failed",
+                message="Could not create rollback action (an equivalent action may already be in flight).",
+            )
+            return False
         rollback_action_id = new_action_res.data[0]["id"]
 
         link = (
@@ -391,6 +495,8 @@ class ActionRunner:
         }).eq("id", rollback_action_id).execute()
         if success:
             self.db.table("optimization_actions").update({"status": "rolled_back"}).eq("id", action_id).execute()
+        else:
+            self._release_rollback_link(rollback_action_id)
         self.audit.log_action(
             event_type="rollback_completed" if success else "rollback_failed",
             actor=user_id,
@@ -403,6 +509,46 @@ class ActionRunner:
         return success
 
     # ------------------------------------------------------------------ helpers
+
+    def _stale_anomaly_reason(self, action: dict) -> Optional[str]:
+        anomaly_id = action.get("anomaly_id")
+        if not anomaly_id:
+            return None
+        try:
+            res = self.db.table("anomalies").select("status").eq("id", anomaly_id).execute()
+        except Exception:
+            logger.exception("Could not read anomaly %s", anomaly_id)
+            return "could not confirm the triggering anomaly is still active"
+        if not res.data:
+            return "triggering anomaly no longer exists"
+        status = res.data[0].get("status")
+        if status != "active":
+            return f"triggering anomaly is {status}, not active"
+        return None
+
+    def _live_state_problem(self, action: dict, resource: dict) -> Optional[str]:
+        expected = EXPECTED_LIVE_STATE.get(action["action_type"])
+        if not expected:
+            return None
+        try:
+            observed = self.cloud.get_instance_state(resource["provider_id"])
+        except Exception:
+            logger.exception("Live state read failed for %s", resource.get("provider_id"))
+            observed = None
+        if observed is None:
+            return "could not read the live resource state"
+        if observed != expected:
+            return f"live state is {observed}, expected {expected}"
+        return None
+
+    def _release_rollback_link(self, rollback_action_id: str) -> None:
+        """A failed rollback must not block a retry: unlink it from the
+        original (which is still `completed`)."""
+        try:
+            self.db.table("optimization_actions").update({"rollback_action_id": None}) \
+                .eq("rollback_action_id", rollback_action_id).eq("status", "completed").execute()
+        except Exception:
+            logger.exception("Could not release rollback link for %s", rollback_action_id)
 
     def _capture_pre_state(self, action, resource) -> dict:
         pre = {"state": resource.get("state"), "metadata": resource.get("metadata"), "tags": resource.get("tags")}

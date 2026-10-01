@@ -112,6 +112,22 @@ class SafetyLayer:
 
         return True, "Passed all safety checks."
 
+    def check_rollback(self, action_type: str, resource_id: str) -> tuple[bool, str]:
+        """Gate for operator-initiated rollbacks.
+
+        Deliberately *not* gated by the kill-switch, cooldown or daily cap: an
+        undo must stay possible while automation is stopped. Still enforced:
+        destructive-action ban, protection tags, the RDS rule, no duplicate
+        in-flight action, and the budget for actions that raise spend."""
+        ok, reason = self.check_proposal(action_type, resource_id)
+        if not ok:
+            return ok, reason
+        if action_type in COST_INCREASING_ACTIONS:
+            over, why = self.budget_status()
+            if over:
+                return False, why
+        return True, "Passed rollback checks."
+
     # Backwards-compatible name used by earlier callers/tests.
     def check_action_safe(self, action_type: str, resource_id: str, action_id: Optional[str] = None) -> tuple[bool, str]:
         return self.check_execution(action_type, resource_id, action_id)
@@ -119,20 +135,50 @@ class SafetyLayer:
     def _real_executions_since(
         self, since: datetime, resource_id: Optional[str] = None, exclude_action_id: Optional[str] = None
     ) -> list:
-        """Non-dry-run actions that reached AWS (executing/completed/failed after submit)."""
-        query = (
-            self.db.table("optimization_actions")
-            .select("id")
-            .eq("dry_run", False)
+        """State-changing executions since `since` that count against the caps:
+
+        * real (non-dry-run) actions that reached the cloud — executing,
+          completed, rolled back, or failed *after* the mutating call
+          (pre_state is only written right before it);
+        * actions claimed but not yet submitted (executed_at still NULL).
+          Their dry-run flag is not final yet, so they are counted
+          conservatively; otherwise concurrent executions could each pass
+          the cap check before any of them records executed_at.
+        """
+        def base():
+            q = (
+                self.db.table("optimization_actions")
+                .select("id")
+                .not_.in_("action_type", sorted(METADATA_ONLY_ACTIONS))
+            )
+            if resource_id:
+                q = q.eq("resource_id", resource_id)
+            if exclude_action_id:
+                q = q.neq("id", exclude_action_id)
+            return q
+
+        submitted = (
+            base().eq("dry_run", False)
             .in_("status", ["executing", "completed", "rolled_back"])
             .gte("executed_at", since.isoformat())
-            .not_.in_("action_type", sorted(METADATA_ONLY_ACTIONS))
+            .execute().data or []
         )
-        if resource_id:
-            query = query.eq("resource_id", resource_id)
-        if exclude_action_id:
-            query = query.neq("id", exclude_action_id)
-        return query.execute().data or []
+        failed_after_submit = (
+            base().eq("dry_run", False).eq("status", "failed")
+            .not_.is_("pre_state", "null")
+            .gte("executed_at", since.isoformat())
+            .execute().data or []
+        )
+        claimed = (
+            base().eq("status", "executing")
+            .is_("executed_at", "null")
+            .gte("claimed_at", since.isoformat())
+            .execute().data or []
+        )
+        seen: dict = {}
+        for row in submitted + failed_after_submit + claimed:
+            seen[row["id"]] = row
+        return list(seen.values())
 
     def budget_status(self, now: Optional[datetime] = None) -> tuple[bool, str]:
         """Returns (over_budget, reason). Fails closed: unknown spend counts as over."""

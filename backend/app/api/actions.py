@@ -68,6 +68,10 @@ def approve_action(
     action = _get(action_id)
     if action["status"] not in ("pending", "pending_approval"):
         raise HTTPException(status_code=409, detail="Action is not awaiting approval")
+    runner = get_runner()
+    if payload.approved and runner.is_expired(action):
+        runner.expire(action, actor_label(user))
+        raise HTTPException(status_code=409, detail="Action proposal has expired; wait for it to be re-proposed")
 
     new_status = "approved" if payload.approved else "rejected"
     # Compare-and-swap on the status we read: a concurrent approve/execute wins once.
