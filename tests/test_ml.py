@@ -72,6 +72,74 @@ def test_offline_evaluation_on_holdout_meets_targets(scenario):
     assert metrics["precision"] >= 0.60
 
 
+def test_generator_is_independent_of_wall_clock():
+    path = os.path.join(SCENARIOS, "idle_ec2.json")
+    a, _ = generate_from_scenario(path, seed=1)
+    b, _ = generate_from_scenario(path, seed=1)
+    assert a.equals(b)
+    assert a["time"].min().hour == 0  # fixed anchor, not "now - N minutes"
+
+
+def test_promoted_model_has_metadata_and_versioned_predictions(tmp_path):
+    from ml.inference import read_metadata
+    feats, labels = _features("idle_ec2.json", "ec2")
+    trainer = ModelTrainer(models_dir=str(tmp_path))
+    assert trainer.train_isolation_forest(feats[~labels.values], "ec2") is True
+    meta = read_metadata(str(tmp_path), "ec2")
+    assert meta["version"].startswith("if_ec2_") and meta["sklearn_version"]
+    assert meta["n_samples"] > 0 and 0 <= meta["holdout_flag_rate"] <= 1
+    result = InferenceEngine(models_dir=str(tmp_path)).predict(feats.iloc[-1:], "ec2")
+    assert result["model_version"] == meta["version"]
+
+
+def test_model_failing_validation_is_not_promoted(tmp_path, monkeypatch):
+    from backend.app.config import settings
+    feats, _ = _features("idle_ec2.json", "ec2")
+    monkeypatch.setattr(settings, "ML_MAX_HOLDOUT_FLAG_RATE", -1.0)  # nothing can pass
+    trainer = ModelTrainer(models_dir=str(tmp_path))
+    assert trainer.train_isolation_forest(feats, "ec2") is False
+    assert trainer.last_result["reason"] == "validation_failed"
+    assert not os.path.exists(os.path.join(tmp_path, "if_ec2_latest.pkl"))
+
+
+def test_rejected_retrain_keeps_previous_model(tmp_path, monkeypatch):
+    from backend.app.config import settings
+    feats, _ = _features("idle_ec2.json", "ec2")
+    trainer = ModelTrainer(models_dir=str(tmp_path))
+    assert trainer.train_isolation_forest(feats, "ec2")
+    before = os.path.getmtime(os.path.join(tmp_path, "if_ec2_latest.pkl"))
+    monkeypatch.setattr(settings, "ML_MAX_HOLDOUT_FLAG_RATE", -1.0)
+    assert trainer.train_isolation_forest(feats, "ec2") is False
+    assert os.path.getmtime(os.path.join(tmp_path, "if_ec2_latest.pkl")) == before
+
+
+def test_model_from_other_sklearn_version_is_not_loaded(tmp_path):
+    import json
+    feats, _ = _features("idle_ec2.json", "ec2")
+    assert ModelTrainer(models_dir=str(tmp_path)).train_isolation_forest(feats, "ec2")
+    meta_path = os.path.join(tmp_path, "if_ec2_latest.json")
+    with open(meta_path) as f:
+        meta = json.load(f)
+    meta["sklearn_version"] = "0.0.1"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f)
+    assert InferenceEngine(models_dir=str(tmp_path)).predict(feats.iloc[-1:], "ec2")["reason"] == "Model not trained"
+
+
+def test_drift_is_measured_against_previous_model(tmp_path):
+    feats, _ = _features("idle_ec2.json", "ec2")
+    trainer = ModelTrainer(models_dir=str(tmp_path))
+    assert trainer.train_isolation_forest(feats, "ec2")
+    assert trainer.last_result["drift_vs_previous"] is None  # first model
+    trainer.train_isolation_forest(feats * 10 + 100, "ec2")
+    assert trainer.last_result["drift_vs_previous"] > 1.0
+
+
+def test_strict_evaluation_cli_passes():
+    from ml import evaluation
+    assert evaluation.main(["--strict"]) == 0
+
+
 def test_evaluation_does_not_touch_production_models():
     prod = InferenceEngine().models_dir
     before = {f: os.path.getmtime(os.path.join(prod, f)) for f in os.listdir(prod)} if os.path.isdir(prod) else {}

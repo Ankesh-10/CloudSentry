@@ -9,11 +9,9 @@ from backend.app.db.asyncpg_pool import get_pool
 from backend.app.db.pagination import fetch_all
 from backend.app.db.supabase_client import get_supabase_client
 from ml.features import build_training_dataset
-from ml.trainer import ModelTrainer
+from ml.trainer import MIN_TRAINING_ROWS, ModelTrainer
 
 logger = logging.getLogger(__name__)
-
-MIN_TRAINING_ROWS = 500
 
 
 class MLRetrainingService:
@@ -60,13 +58,17 @@ class MLRetrainingService:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         trained = {}
         for resource_type, df_list in training_data_by_type.items():
-            combined = pd.concat(df_list, ignore_index=True)
+            # Keep time order (each resource's frame is time-ordered) so the
+            # trainer's holdout is the most recent data.
+            combined = pd.concat(df_list).sort_index().reset_index(drop=True)
             if len(combined) < MIN_TRAINING_ROWS:
                 logger.info("Skipping %s retraining: %s samples < %s.", resource_type, len(combined), MIN_TRAINING_ROWS)
                 continue
+            if len(combined) > settings.ML_MAX_TRAINING_ROWS:
+                # Bound memory/CPU on small instances: the most recent rows.
+                combined = combined.tail(settings.ML_MAX_TRAINING_ROWS).reset_index(drop=True)
             logger.info("Retraining %s model with %s samples.", resource_type, len(combined))
-            trained[resource_type] = await asyncio.to_thread(
-                self.trainer.train_isolation_forest, combined, resource_type, today
-            )
+            await asyncio.to_thread(self.trainer.train_isolation_forest, combined, resource_type, today)
+            trained[resource_type] = dict(self.trainer.last_result)
         logger.info("ML Model Retraining cycle completed: %s", trained)
         return trained
