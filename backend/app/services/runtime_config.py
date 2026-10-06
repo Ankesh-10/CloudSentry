@@ -12,7 +12,7 @@ from backend.app.config import settings
 logger = logging.getLogger(__name__)
 
 BOOL_KEYS = {"GLOBAL_AUTOMATION_ENABLED", "DRY_RUN_MODE"}
-INT_KEYS = {"MAX_ACTIONS_PER_DAY", "ACTION_COOLDOWN_MINUTES", "MAX_CW_API_CALLS_PER_HOUR"}
+INT_KEYS = {"MAX_ACTIONS_PER_DAY", "ACTION_COOLDOWN_MINUTES", "MAX_CW_API_CALLS_PER_HOUR", "MAX_CW_METRICS_PER_HOUR"}
 FLOAT_KEYS = {"MAX_MONTHLY_BUDGET_USD", "MAX_DAILY_SPEND_USD"}
 KNOWN_KEYS = BOOL_KEYS | INT_KEYS | FLOAT_KEYS
 
@@ -21,6 +21,7 @@ MAX_VALUES: dict[str, float] = {
     "MAX_ACTIONS_PER_DAY": 1_000,
     "ACTION_COOLDOWN_MINUTES": 7 * 24 * 60,
     "MAX_CW_API_CALLS_PER_HOUR": 100_000,
+    "MAX_CW_METRICS_PER_HOUR": 1_000_000,
     "MAX_MONTHLY_BUDGET_USD": 1_000_000,
     "MAX_DAILY_SPEND_USD": 100_000,
 }
@@ -84,7 +85,7 @@ def _is_safer(key: str, value: Any) -> bool:
 # Caps that allow more when raised / when lowered. Loosening one is as risky as
 # enabling automation: one operator could otherwise lift the daily action cap
 # to 1000 or the budget to $1M alone.
-LOOSER_WHEN_HIGHER = {"MAX_ACTIONS_PER_DAY", "MAX_CW_API_CALLS_PER_HOUR",
+LOOSER_WHEN_HIGHER = {"MAX_ACTIONS_PER_DAY", "MAX_CW_API_CALLS_PER_HOUR", "MAX_CW_METRICS_PER_HOUR",
                       "MAX_MONTHLY_BUDGET_USD", "MAX_DAILY_SPEND_USD"}
 LOOSER_WHEN_LOWER = {"ACTION_COOLDOWN_MINUTES"}
 

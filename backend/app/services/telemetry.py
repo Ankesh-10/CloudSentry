@@ -38,27 +38,34 @@ METRIC_MAP = {
     ],
 }
 
-# Approximate CloudWatch GetMetricData calls this process has made in the current hour.
-_cw_calls_this_hour = {"hour": None, "count": 0}
+# Approximate CloudWatch GetMetricData usage of this process in the current
+# hour. AWS bills per *metric requested* ($0.01 per 1,000), not per call, so the
+# metric count is what bounds cost; the call count bounds request rate.
+_cw_calls_this_hour = {"hour": None, "count": 0, "metrics": 0}
 _cw_lock = threading.Lock()
 
 
-def _note_cw_calls(n: int) -> bool:
+def _note_cw_calls(n: int, metrics: int = 0) -> bool:
     with _cw_lock:
-        return _note_cw_calls_locked(n)
+        return _note_cw_calls_locked(n, metrics)
 
 
-def _note_cw_calls_locked(n: int) -> bool:
+def _note_cw_calls_locked(n: int, metrics: int = 0) -> bool:
     now = datetime.datetime.now(datetime.timezone.utc)
     hour = now.replace(minute=0, second=0, microsecond=0)
     if _cw_calls_this_hour["hour"] != hour:
-        _cw_calls_this_hour["hour"] = hour
-        _cw_calls_this_hour["count"] = 0
+        _cw_calls_this_hour.update(hour=hour, count=0, metrics=0)
     limit = int(runtime_config.get_flag("MAX_CW_API_CALLS_PER_HOUR", 200))
     if _cw_calls_this_hour["count"] + n > limit:
         logger.warning("CloudWatch hourly call cap reached (%s/%s)", _cw_calls_this_hour["count"], limit)
         return False
+    metric_limit = int(runtime_config.get_flag("MAX_CW_METRICS_PER_HOUR", 2000))
+    if _cw_calls_this_hour["metrics"] + metrics > metric_limit:
+        logger.warning("CloudWatch hourly metric cap reached (%s+%s > %s)",
+                       _cw_calls_this_hour["metrics"], metrics, metric_limit)
+        return False
     _cw_calls_this_hour["count"] += n
+    _cw_calls_this_hour["metrics"] += metrics
     return True
 
 
@@ -140,7 +147,7 @@ class TelemetryService:
             adapter = self._adapter_for(region)
             for (period, lookback), (queries, mapping) in build_queries(region_resources).items():
                 chunks = max(1, (len(queries) + 499) // 500)
-                if not _note_cw_calls(chunks):
+                if not _note_cw_calls(chunks, len(queries)):
                     logger.warning("Skipping %s CloudWatch queries (period=%ss): hourly cap reached",
                                    len(queries), period)
                     continue

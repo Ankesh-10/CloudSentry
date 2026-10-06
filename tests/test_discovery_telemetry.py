@@ -63,6 +63,18 @@ def test_discovery_all_types_tags_and_name_collision(aws, fake_db):
     assert inst["state"] in ("terminated", "deleted")
 
 
+def test_cloudwatch_cap_counts_billed_metrics_not_just_calls(monkeypatch):
+    """GetMetricData is billed per metric: one call carrying 500 metrics costs
+    500x a call carrying one, so the cost cap must count metrics."""
+    from backend.app.services import runtime_config, telemetry
+    monkeypatch.setattr(telemetry, "_cw_calls_this_hour", {"hour": None, "count": 0, "metrics": 0})
+    runtime_config.set_flag("MAX_CW_METRICS_PER_HOUR", 1000, persist=False)
+    assert telemetry._note_cw_calls(1, 600) is True
+    assert telemetry._note_cw_calls(1, 600) is False      # 1 call, but over the metric budget
+    assert (telemetry._cw_calls_this_hour["count"], telemetry._cw_calls_this_hour["metrics"]) == (1, 600)
+    assert telemetry._note_cw_calls(1, 400) is True
+
+
 def test_build_queries_uses_per_type_windows():
     resources = [
         {"id": "a", "provider_id": "i-1", "resource_type": "ec2"},
