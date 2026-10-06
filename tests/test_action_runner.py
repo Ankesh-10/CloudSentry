@@ -201,6 +201,18 @@ def test_limit_lambda_sets_positive_cap_and_restores(aws, fake_db):
     assert lam.get_function_concurrency(FunctionName="fn").get("ReservedConcurrentExecutions") is None
 
 
+def test_limit_lambda_never_raises_a_tighter_existing_limit(aws, fake_db):
+    arn = _lambda()
+    lam = boto3.client("lambda", region_name="us-east-1")
+    lam.put_function_concurrency(FunctionName="fn", ReservedConcurrentExecutions=2)
+    _seed(fake_db, "fn", rtype="lambda", action_type="limit_lambda", metadata={"arn": arn})
+    _live()
+    assert ActionRunner().execute_action("a1") is True
+    assert lam.get_function_concurrency(FunctionName="fn")["ReservedConcurrentExecutions"] == 2
+    action = _action(fake_db)
+    assert action["status"] == "completed" and "nothing changed" in action["post_state"]["result"]
+
+
 def test_zero_concurrency_refused(aws, fake_db, monkeypatch):
     arn = _lambda()
     _seed(fake_db, "fn", rtype="lambda", action_type="limit_lambda", metadata={"arn": arn})

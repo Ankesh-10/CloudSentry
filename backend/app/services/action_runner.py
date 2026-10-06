@@ -607,7 +607,12 @@ class ActionRunner:
             limit = settings.LAMBDA_CONCURRENCY_LIMIT
             if limit <= 0:
                 return False, "Refusing to set Lambda concurrency <= 0 (hard disable).", False
-            success = self._cloud(resource).limit_function_concurrency(provider_id, limit)
+            # A "limit" must never loosen: a function already reserved at or
+            # below the cap keeps its tighter setting.
+            current = self._cloud(resource).get_function_concurrency(provider_id)
+            if current is not None and current <= limit:
+                return True, f"Lambda concurrency already {current} (<= {limit}); nothing changed.", False
+            success =self._cloud(resource).limit_function_concurrency(provider_id, limit)
             return success, f"Lambda concurrency limited to {limit}." if success else "Failed to limit concurrency.", True
         if action_type == "apply_tags":
             new_tags = self._missing_tags(resource)
