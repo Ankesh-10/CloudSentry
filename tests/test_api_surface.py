@@ -104,6 +104,25 @@ def test_detailed_health_caches_budget(client, monkeypatch):
     assert len(calls) == 1
 
 
+def test_unwritable_model_dir_is_reported(client, monkeypatch):
+    async def fake_probe(body, issues, is_leader):
+        body["db"] = {"status": "ok", "latency_ms": 1.0}
+        return True
+
+    from backend.app.services.safety_layer import SafetyLayer
+    monkeypatch.setattr(health, "_probe_db", fake_probe)
+    monkeypatch.setattr(SafetyLayer, "budget_status", lambda self: (False, ""))
+    monkeypatch.setattr(health, "models_dir_writable", lambda path: False)
+    body = client.get("/api/v1/system/health", headers=_h("user-1")).json()
+    assert body["ml_model"]["writable"] is False
+    assert "model_dir_not_writable" in body["issues"] and body["status"] == "degraded"
+
+
+def test_models_dir_writable_walks_up_to_an_existing_parent(tmp_path):
+    assert health.models_dir_writable(str(tmp_path / "not" / "yet" / "created")) is True
+    assert health.models_dir_writable(str(tmp_path)) is True
+
+
 # -- rate limiting -------------------------------------------------------------
 
 def test_sliding_window_limiter_expires_hits():

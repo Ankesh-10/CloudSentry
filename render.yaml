@@ -13,6 +13,10 @@ services:
     # Trained ML models must survive deploys (otherwise every deploy is a cold
     # start until the nightly retrain). A disk pins the service to a single
     # instance, which the scheduler's leader election assumes anyway.
+    # The container runs as uid 1000: after the first deploy, check
+    # GET /api/v1/system/health -> ml_model.writable is true. If it is false
+    # (issue "model_dir_not_writable"), the mounted disk is not writable by
+    # that uid and every nightly retrain fails.
     disk:
       name: cloudsentry-models
       mountPath: /app/models

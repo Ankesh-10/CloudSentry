@@ -21,6 +21,12 @@ class MLRetrainingService:
 
     async def run(self):
         logger.info("Starting ML Model Retraining cycle...")
+        from backend.app.services.health import models_dir_writable
+        if not models_dir_writable(self.trainer.models_dir):
+            # Fail fast and loudly (job failure -> alert) instead of training
+            # for minutes and dying on the final write.
+            raise RuntimeError(f"Model directory {self.trainer.models_dir} is not writable by this process "
+                               "(uid mismatch on a mounted disk?); no model can be promoted")
         pool = get_pool()
         resources = await asyncio.to_thread(
             fetch_all,
