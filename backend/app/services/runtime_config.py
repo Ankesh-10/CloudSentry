@@ -229,6 +229,37 @@ def request_change(key: str, value: Any, actor: str) -> dict[str, Any]:
             "confirmed_by": actor}
 
 
+def list_pending() -> list[dict[str, Any]]:
+    """Every change awaiting a second operator (config keys and policy
+    toggles), newest first. Expired requests are listed as expired: they can
+    no longer be confirmed, only re-requested."""
+    from backend.app.db.supabase_client import get_supabase_client
+    rows = get_supabase_client().table("system_config").select("key, value").execute().data or []
+    now = datetime.now(timezone.utc)
+    out = []
+    for row in rows:
+        key = row.get("key") or ""
+        if not key.startswith(PENDING_PREFIX):
+            continue
+        try:
+            pending = json.loads(row.get("value") or "")
+            requested_at = datetime.fromisoformat(pending["requested_at"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        expires_at = requested_at + PENDING_TTL
+        out.append({"key": key[len(PENDING_PREFIX):], "value": pending.get("value"),
+                    "requested_by": pending.get("requested_by"), "requested_at": requested_at.isoformat(),
+                    "expires_at": expires_at.isoformat(), "expired": now > expires_at})
+    return sorted(out, key=lambda p: p["requested_at"], reverse=True)
+
+
+def cancel_pending(key: str) -> bool:
+    """Withdraw a pending request (`key` as listed, without the prefix)."""
+    from backend.app.db.supabase_client import get_supabase_client
+    res = get_supabase_client().table("system_config").delete().eq("key", PENDING_PREFIX + key).execute()
+    return bool(res.data)
+
+
 def emergency_stop() -> tuple[dict[str, Any], bool]:
     """Disable automation. Always effective in this process; returns whether the
     database copy was also updated (other replicas read it before acting)."""

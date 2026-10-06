@@ -84,6 +84,35 @@ def update_system_config_body(payload: SystemConfigBody, user: dict = Depends(re
     return _set(payload.key, payload.value, user)
 
 
+@router.get("/config/pending")
+def list_pending_changes():
+    """Changes awaiting a second operator (config keys and policy toggles)."""
+    return runtime_config.list_pending()
+
+
+# Withdrawing a request is the safe direction, so any operator may do it (not
+# only the requester): a wrong request must not linger until it expires.
+@router.post("/config/pending/{pending_key}/cancel", dependencies=[rate_limit("config", 20)])
+def cancel_pending_change(pending_key: str = Path(max_length=100, pattern=r"^[A-Za-z0-9_:.-]+$"),
+                          user: dict = Depends(require_operator)):
+    actor = actor_label(user)
+    if not any(p["key"] == pending_key for p in runtime_config.list_pending()):
+        raise HTTPException(status_code=404, detail="No pending change with that key")
+    try:
+        AuditLogger().log_action(
+            event_type="config_change_cancelled",
+            actor=actor,
+            request_params={"key": pending_key},
+            message=f"{actor} cancelled pending change {pending_key}",
+            required=True,
+        )
+    except AuditWriteError:
+        raise HTTPException(status_code=503, detail="Audit log unavailable; nothing cancelled")
+    if not runtime_config.cancel_pending(pending_key):
+        raise HTTPException(status_code=404, detail="No pending change with that key")
+    return {"status": "cancelled", "key": pending_key}
+
+
 # Any authenticated user may stop automation: stopping is always the safe
 # direction, and it must not wait for an operator to be found.
 @router.post("/emergency-stop", dependencies=[rate_limit("emergency_stop", 5)])
