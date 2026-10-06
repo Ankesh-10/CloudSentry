@@ -15,6 +15,7 @@ from backend.app.api import actions, anomalies, audit, dashboard, metrics, polic
 from backend.app.auth import require_viewer
 from backend.app.config import settings
 from backend.app.db.asyncpg_pool import close_db_pool, init_db_pool, is_transaction_pooler
+from backend.app.db.pagination import TOTAL_COUNT_HEADER
 from backend.app.db.schema import check_schema_version
 from backend.app.logging_config import configure_logging
 from backend.app.rate_limit import RateLimitMiddleware
@@ -144,7 +145,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", REQUEST_ID_HEADER],
-    expose_headers=[REQUEST_ID_HEADER],
+    expose_headers=[REQUEST_ID_HEADER, TOTAL_COUNT_HEADER],
 )
 # Added last = outermost: every response, including 429s, carries a request id.
 app.add_middleware(RequestContextMiddleware)

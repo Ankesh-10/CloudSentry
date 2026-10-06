@@ -3,10 +3,11 @@ from datetime import datetime, timezone
 from typing import List, Literal, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 
 from backend.app.auth import actor_label, require_operator
+from backend.app.db.pagination import set_total
 from backend.app.db.supabase_client import get_supabase_client
 from backend.app.schemas.models import Anomaly
 from backend.app.services.audit_logger import AuditLogger, AuditWriteError
@@ -24,17 +25,20 @@ class AnomalyUpdate(BaseModel):
 
 @router.get("/", response_model=List[Anomaly])
 def list_anomalies(
+    response: Response,
     status: Optional[AnomalyStatus] = None,
     resource_id: Optional[UUID] = None,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
-    query = get_supabase_client().table("anomalies").select("*")
+    query = get_supabase_client().table("anomalies").select("*", count="exact")
     if status:
         query = query.eq("status", status)
     if resource_id:
         query = query.eq("resource_id", str(resource_id))
-    return query.order("detected_at", desc=True).range(offset, offset + limit - 1).execute().data
+    res = query.order("detected_at", desc=True).range(offset, offset + limit - 1).execute()
+    set_total(response, res)
+    return res.data
 
 
 @router.get("/{anomaly_id}", response_model=Anomaly)

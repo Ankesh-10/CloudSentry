@@ -3,10 +3,11 @@ from functools import lru_cache
 from typing import List, Literal, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 
 from backend.app.auth import actor_label, require_operator
+from backend.app.db.pagination import set_total
 from backend.app.db.supabase_client import get_supabase_client
 from backend.app.rate_limit import rate_limit
 from backend.app.schemas.models import Action
@@ -44,14 +45,17 @@ def _get(action_id: UUID) -> dict:
 
 @router.get("/", response_model=List[Action])
 def list_actions(
+    response: Response,
     status: Optional[ActionStatus] = None,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
-    query = get_supabase_client().table("optimization_actions").select("*")
+    query = get_supabase_client().table("optimization_actions").select("*", count="exact")
     if status:
         query = query.eq("status", status)
-    return query.order("created_at", desc=True).range(offset, offset + limit - 1).execute().data
+    res = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
+    set_total(response, res)
+    return res.data
 
 
 @router.get("/{action_id}", response_model=Action)

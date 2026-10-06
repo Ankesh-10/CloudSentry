@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 from backend.app.auth import actor_label, require_operator
 from backend.app.config import settings
 from backend.app.db.asyncpg_pool import get_pool
+from backend.app.db.pagination import set_total
 from backend.app.db.supabase_client import get_supabase_client
 from backend.app.rate_limit import rate_limit
 from backend.app.schemas.models import Resource
@@ -26,17 +27,20 @@ router = APIRouter()
 
 @router.get("/", response_model=List[Resource])
 def list_resources(
+    response: Response,
     resource_type: Optional[str] = Query(default=None, max_length=30),
     include_deleted: bool = False,
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
-    query = get_supabase_client().table("resources").select("*")
+    query = get_supabase_client().table("resources").select("*", count="exact")
     if resource_type:
         query = query.eq("resource_type", resource_type)
     if not include_deleted:
         query = query.not_.in_("state", ["terminated", "deleted"])
-    return query.order("name").range(offset, offset + limit - 1).execute().data
+    res = query.order("name").range(offset, offset + limit - 1).execute()
+    set_total(response, res)
+    return res.data
 
 
 def _resource_bundle(rid: str) -> dict:

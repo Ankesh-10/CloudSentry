@@ -5,6 +5,15 @@ from typing import Any, Callable, List
 # over the whole table, or a sum, must page explicitly.
 PAGE_SIZE = 1000
 MAX_ROWS = 100_000
+TOTAL_COUNT_HEADER = "X-Total-Count"
+
+
+def set_total(response: Any, result: Any) -> None:
+    """Expose the unpaged row count of a `select(..., count="exact")` so
+    clients can render page numbers; the body stays a plain list."""
+    count = getattr(result, "count", None)
+    if count is not None:
+        response.headers[TOTAL_COUNT_HEADER] = str(count)
 
 
 def fetch_all(build_query: Callable[[], Any], page_size: int = PAGE_SIZE) -> List[dict]:

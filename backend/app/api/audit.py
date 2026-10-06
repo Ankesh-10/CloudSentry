@@ -2,9 +2,10 @@ from datetime import datetime
 from typing import Any, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 
+from backend.app.db.pagination import set_total
 from backend.app.db.supabase_client import get_supabase_client
 
 router = APIRouter()
@@ -27,6 +28,7 @@ class AuditLog(BaseModel):
 
 @router.get("/", response_model=List[AuditLog])
 def list_audit_logs(
+    response: Response,
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0, le=100_000),
     resource_id: Optional[UUID] = None,
@@ -39,7 +41,7 @@ def list_audit_logs(
 ):
     if since and until and since > until:
         raise HTTPException(status_code=400, detail="'since' must be before 'until'")
-    query = get_supabase_client().table("audit_logs").select("*")
+    query = get_supabase_client().table("audit_logs").select("*", count="exact")
     if resource_id:
         query = query.eq("resource_id", str(resource_id))
     if action_id:
@@ -54,4 +56,6 @@ def list_audit_logs(
         query = query.gte("created_at", since.isoformat())
     if until:
         query = query.lt("created_at", until.isoformat())
-    return query.order("created_at", desc=True).range(offset, offset + limit - 1).execute().data
+    res = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
+    set_total(response, res)
+    return res.data
