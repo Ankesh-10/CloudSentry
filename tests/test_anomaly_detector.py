@@ -2,12 +2,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from backend.app.config import settings
 from backend.app.services.anomaly_detector import AnomalyDetectorService
 
 NOW = datetime.now(timezone.utc)
 
 
-def _idle_records(hours=3, cpu=1.0, end=NOW):
+def _idle_records(hours=settings.ML_IDLE_WINDOW_HOURS + 1, cpu=1.0, end=NOW):
     rows = []
     for i in range(int(hours * 12), 0, -1):
         t = end - timedelta(minutes=5 * i)

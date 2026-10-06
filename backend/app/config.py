@@ -87,7 +87,9 @@ class Settings(BaseSettings):
     ML_MIN_POINTS_ZSCORE: int = 144
     ML_MIN_POINTS_IF: int = 2016
     ML_IDLE_CPU_THRESHOLD_PCT: float = 5.0
-    ML_IDLE_WINDOW_HOURS: float = 2.0
+    # A full day: a 2-hour window stopped servers that are merely quiet
+    # between nightly batches or outside office hours.
+    ML_IDLE_WINDOW_HOURS: float = 24.0
     LAMBDA_CONCURRENCY_LIMIT: int = 10
     REQUIRED_TAGS: str = "Project,Owner"
 

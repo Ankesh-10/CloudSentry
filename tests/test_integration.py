@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from jose import jwt
 from moto import mock_aws
 
+from backend.app.config import settings
 from backend.app.main import app
 from backend.app.services import runtime_config
 from backend.app.services.action_runner import ActionRunner
@@ -100,7 +101,7 @@ async def test_full_loop_idle_ec2(world, monkeypatch):
 
     # 3. Detection over a full idle window (collected history + this cycle).
     history = []
-    for i in range(36, 0, -1):
+    for i in range(int(settings.ML_IDLE_WINDOW_HOURS * 12) + 12, 0, -1):
         t = NOW - timedelta(minutes=5 * i)
         history.append({"time": t, "metric_name": "CPUUtilization", "value": 0.5})
         history.append({"time": t, "metric_name": "NetworkIn", "value": 50.0})
