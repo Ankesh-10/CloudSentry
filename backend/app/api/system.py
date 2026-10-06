@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 from backend.app.auth import actor_label, get_current_user, require_operator
 from backend.app.rate_limit import rate_limit
-from backend.app.services import runtime_config
+from backend.app.services import alerts, runtime_config
 from backend.app.services.audit_logger import AuditLogger, AuditWriteError
 
 router = APIRouter()
@@ -96,6 +96,7 @@ def emergency_stop(user: dict = Depends(get_current_user)):
         response_status="persisted" if persisted else "in_memory_only",
         message="GLOBAL_AUTOMATION_ENABLED set to false via emergency stop",
     )
+    alerts.emergency_stop(actor_label(user), persisted)
     return {"automation_enabled": False, "persisted": persisted, "audit_logged": audited, "config": flags}
 
 

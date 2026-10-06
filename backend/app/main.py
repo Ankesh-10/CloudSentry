@@ -1,17 +1,21 @@
+import hmac
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
+from backend.app import metrics as app_metrics
 from backend.app import scheduler
 from backend.app.api import actions, anomalies, audit, dashboard, metrics, resources, system
 from backend.app.auth import require_viewer
 from backend.app.config import settings
-from backend.app.db.asyncpg_pool import close_db_pool, init_db_pool
+from backend.app.db.asyncpg_pool import close_db_pool, init_db_pool, is_transaction_pooler
+from backend.app.db.schema import check_schema_version
 from backend.app.logging_config import configure_logging
 from backend.app.rate_limit import RateLimitMiddleware
 from backend.app.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
@@ -35,6 +39,13 @@ def validate_startup_config() -> None:
         problems.append("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY")
     if not settings.DATABASE_URL:
         problems.append("DATABASE_URL")
+    elif is_transaction_pooler(settings.DATABASE_URL):
+        # Session-level advisory locks (leader election) do not survive the
+        # transaction pooler: two replicas could both run the scheduler.
+        problems.append("DATABASE_URL points at a transaction pooler (port 6543 / pgbouncer); "
+                        "use the session pooler (port 5432) or a direct connection")
+    if settings.ALERT_WEBHOOK_URL and not settings.ALERT_WEBHOOK_URL.startswith("https://"):
+        problems.append("ALERT_WEBHOOK_URL must be an https:// URL")
     if "*" in (settings.CORS_ORIGINS or ""):
         logger.warning("CORS_ORIGINS contains '*'; it is ignored (credentialed CORS requires explicit origins).")
     if settings.ML_ANOMALY_THRESHOLD is not None:
@@ -53,7 +64,9 @@ async def lifespan(app: FastAPI):
         validate_startup_config()
     runtime_config.load_from_env()
     await run_in_threadpool(runtime_config.refresh_from_db)
-    await init_db_pool()
+    await init_db_pool(required=not _testing())
+    if not _testing():
+        await check_schema_version()
     if not _testing() and settings.SCHEDULER_ENABLED:
         await scheduler.start()
     yield
@@ -82,6 +95,34 @@ SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
     "Cache-Control": "no-store",
 }
+
+
+def _route_template(request: Request) -> str:
+    """Route template (never the raw path) so metric label cardinality stays
+    bounded. Included routers report their path without the mount prefix, so
+    re-attach the prefix the request path was served under."""
+    route = getattr(request.scope.get("route"), "path", None)
+    if route is None:
+        return "unmatched"
+    if route.startswith("/api/") or route.startswith("/metrics"):
+        return route
+    path = request.url.path
+    prefix = next((p for p in ROUTER_PREFIXES if path == p or path.startswith(p + "/")), "")
+    return prefix + route
+
+
+@app.middleware("http")
+async def request_metrics(request: Request, call_next):
+    start = time.perf_counter()
+    status_class = "5xx"
+    try:
+        response = await call_next(request)
+        status_class = f"{response.status_code // 100}xx"
+        return response
+    finally:
+        route = _route_template(request)
+        app_metrics.inc("cloudsentry_http_requests_total", method=request.method, route=route, status=status_class)
+        app_metrics.observe("cloudsentry_http_request_duration_seconds", time.perf_counter() - start, route=route)
 
 
 @app.middleware("http")
@@ -119,13 +160,32 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 # Every router needs at least viewer; mutating routes add require_operator.
 auth_deps = [Depends(require_viewer)]
 
-app.include_router(resources.router, prefix="/api/v1/resources", tags=["resources"], dependencies=auth_deps)
-app.include_router(metrics.router, prefix="/api/v1/metrics", tags=["metrics"], dependencies=auth_deps)
-app.include_router(anomalies.router, prefix="/api/v1/anomalies", tags=["anomalies"], dependencies=auth_deps)
-app.include_router(actions.router, prefix="/api/v1/actions", tags=["actions"], dependencies=auth_deps)
-app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["dashboard"], dependencies=auth_deps)
-app.include_router(system.router, prefix="/api/v1/system", tags=["system"], dependencies=auth_deps)
-app.include_router(audit.router, prefix="/api/v1/audit-logs", tags=["audit-logs"], dependencies=auth_deps)
+ROUTERS = [
+    (resources.router, "/api/v1/resources", "resources"),
+    (metrics.router, "/api/v1/metrics", "metrics"),
+    (anomalies.router, "/api/v1/anomalies", "anomalies"),
+    (actions.router, "/api/v1/actions", "actions"),
+    (dashboard.router, "/api/v1/dashboard", "dashboard"),
+    (system.router, "/api/v1/system", "system"),
+    (audit.router, "/api/v1/audit-logs", "audit-logs"),
+]
+# Longest first so the most specific prefix wins in _route_template.
+ROUTER_PREFIXES = sorted((p for _, p, _ in ROUTERS), key=len, reverse=True)
+for _router, _prefix, _tag in ROUTERS:
+    app.include_router(_router, prefix=_prefix, tags=[_tag], dependencies=auth_deps)
+
+
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics(request: Request):
+    """Disabled (404) unless METRICS_TOKEN is set; then bearer-token protected."""
+    token = settings.METRICS_TOKEN
+    if not token:
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    supplied = request.headers.get("authorization", "")
+    if not hmac.compare_digest(supplied.encode(), f"Bearer {token}".encode()):
+        return JSONResponse(status_code=401, content={"detail": "Not authenticated"},
+                            headers={"WWW-Authenticate": "Bearer"})
+    return PlainTextResponse(app_metrics.render(), media_type="text/plain; version=0.0.4")
 
 
 @app.get("/api/v1/health/live", tags=["system"])

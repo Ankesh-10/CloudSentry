@@ -220,7 +220,7 @@ def test_expired_proposal_is_not_executed(aws, fake_db):
     _live()
     assert ActionRunner().execute_action("a1") is False
     assert _state(iid) == "running"
-    assert _action(fake_db)["status"] == "rejected"
+    assert _action(fake_db)["status"] == "failed"
     assert "Expired" in _action(fake_db)["post_state"]["result"]
     assert any(l["event_type"] == "action_expired" for l in fake_db.rows("audit_logs"))
 
@@ -239,7 +239,7 @@ def test_scheduler_sweep_expires_old_proposals(aws, fake_db):
     _action(fake_db)["created_at"] = (NOW - timedelta(days=10)).isoformat()
     runner = ActionRunner()
     runner.execute_pending_auto()
-    assert _action(fake_db)["status"] == "rejected"
+    assert _action(fake_db)["status"] == "failed"
     # Nothing left to expire on a second sweep.
     assert runner.expire_stale_proposals() == 0
 
@@ -260,7 +260,7 @@ def test_approving_expired_proposal_is_409(aws, fake_db):
         res = client.post(f"/api/v1/actions/{aid}/approve", json={"approved": True},
                           headers={"Authorization": f"Bearer {tok}"})
     assert res.status_code == 409
-    assert _action(fake_db, aid)["status"] == "rejected"
+    assert _action(fake_db, aid)["status"] == "failed"
 
 
 # -- execution-time re-validation ------------------------------------------------

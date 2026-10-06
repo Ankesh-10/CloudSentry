@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from backend.app import metrics
+from backend.app.config import settings
 from backend.app.db import leader
 from backend.app.services import job_status, runtime_config
 
@@ -62,10 +64,20 @@ async def _tracked(name: str, coro_factory):
         result = await coro_factory()
     except Exception as e:
         logger.exception("Job %s failed", name)
-        job_status.record(name, False, f"{type(e).__name__}: {e}")
+        entry = job_status.record(name, False, f"{type(e).__name__}: {e}")
+        metrics.inc("cloudsentry_job_runs_total", job=name, result="failure")
+        await _run_sync(job_status.persist, name)
+        await _run_sync(_alert_if_failing, name, entry)
         return None
     job_status.record(name, True)
+    metrics.inc("cloudsentry_job_runs_total", job=name, result="success")
+    await _run_sync(job_status.persist, name)
     return result
+
+
+def _alert_if_failing(name: str, entry: dict) -> None:
+    from backend.app.services import alerts
+    alerts.job_failing(name, entry)
 
 
 async def job_discovery():
@@ -128,13 +140,16 @@ def is_leader() -> bool:
 def setup_scheduler():
     logger.info("Setting up APScheduler jobs...")
     add = scheduler.add_job
-    add(job_discovery, "interval", minutes=15, id="discovery_job", replace_existing=True)
-    add(job_pipeline, "interval", minutes=5, id="pipeline_job", replace_existing=True)
-    add(job_execute, "interval", minutes=2, id="action_execute_job", replace_existing=True)
-    add(job_verify, "interval", minutes=2, id="action_verify_job", replace_existing=True)
+    s = settings
+    add(job_discovery, "interval", minutes=s.JOB_DISCOVERY_MINUTES, id="discovery_job", replace_existing=True)
+    add(job_pipeline, "interval", minutes=s.JOB_PIPELINE_MINUTES, id="pipeline_job", replace_existing=True)
+    add(job_execute, "interval", minutes=s.JOB_EXECUTE_MINUTES, id="action_execute_job", replace_existing=True)
+    add(job_verify, "interval", minutes=s.JOB_VERIFY_MINUTES, id="action_verify_job", replace_existing=True)
     add(job_cost, "cron", minute=5, id="cost_estimation_job", replace_existing=True)
-    add(job_retrain, "cron", hour=2, minute=0, id="ml_retraining_job", replace_existing=True, misfire_grace_time=3600)
-    add(job_retention, "cron", hour=3, minute=0, id="metric_retention_job", replace_existing=True, misfire_grace_time=3600)
+    add(job_retrain, "cron", hour=s.JOB_RETRAIN_HOUR_UTC, minute=0, id="ml_retraining_job",
+        replace_existing=True, misfire_grace_time=3600)
+    add(job_retention, "cron", hour=s.JOB_RETENTION_HOUR_UTC, minute=0, id="metric_retention_job",
+        replace_existing=True, misfire_grace_time=3600)
     add(job_refresh_config, "interval", minutes=1, id="config_refresh_job", replace_existing=True)
     add(job_leadership, "interval", seconds=30, id="leadership_job", replace_existing=True)
     # Work jobs start paused; job_leadership resumes them once the lock is held.

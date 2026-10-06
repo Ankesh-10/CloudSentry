@@ -2,10 +2,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from backend.app import metrics
 from backend.app.adapters.factory import get_cloud_adapter
 from backend.app.config import settings
 from backend.app.db.supabase_client import get_supabase_client
-from backend.app.services import runtime_config
+from backend.app.services import alerts, runtime_config
 from backend.app.services.audit_logger import AuditLogger
 from backend.app.services.safety_layer import DESTRUCTIVE_ACTIONS, NO_CLOUD_ACTIONS, SafetyLayer
 
@@ -57,6 +58,19 @@ class ActionRunner:
         self.cloud = get_cloud_adapter()
         self.audit = AuditLogger()
         self.safety = SafetyLayer()
+        self._regional: dict = {}
+
+    def _cloud(self, resource: dict):
+        """Adapter for the resource's region: AWS API calls are regional, so
+        acting on an instance in eu-west-1 through a us-east-1 client fails.
+        S3 buckets are global but tagged fine through their own region."""
+        region = (resource or {}).get("region")
+        default = getattr(self.cloud, "region", None)
+        if not region or default is None or region == default:
+            return self.cloud
+        if region not in self._regional:
+            self._regional[region] = get_cloud_adapter(region)
+        return self._regional[region]
 
     # ------------------------------------------------------------------ execute
 
@@ -80,7 +94,11 @@ class ActionRunner:
     def expire(self, action: dict, actor: str = "SYSTEM") -> bool:
         res = (
             self.db.table("optimization_actions")
-            .update({"status": "rejected", "post_state": {"result": EXPIRED_MESSAGE}})
+            # 'failed', not 'rejected': the policy engine never re-proposes for an
+            # anomaly with a rejected (human-declined) action, but retries after a
+            # failure once the cooldown passes - which is what a stale proposal
+            # needs. No pre_state is set, so it does not count toward the caps.
+            .update({"status": "failed", "post_state": {"result": EXPIRED_MESSAGE, "expired": True}})
             .eq("id", action["id"])
             .eq("status", action["status"])
             .execute()
@@ -92,7 +110,7 @@ class ActionRunner:
                 resource_id=action.get("resource_id"),
                 action_id=action["id"],
                 aws_api_call=action.get("action_type"),
-                response_status="rejected",
+                response_status="expired",
                 message=EXPIRED_MESSAGE,
             )
         return bool(res.data)
@@ -300,10 +318,10 @@ class ActionRunner:
             if not provider_id:
                 timed_out = True
             elif action_type in VERIFY_TARGETS:
-                observed = self.cloud.get_instance_state(provider_id)
+                observed = self._cloud(resource).get_instance_state(provider_id)
                 ok = observed == VERIFY_TARGETS[action_type]
             elif action_type == "limit_lambda":
-                observed = self.cloud.get_function_concurrency(provider_id)
+                observed = self._cloud(resource).get_function_concurrency(provider_id)
                 ok = observed == settings.LAMBDA_CONCURRENCY_LIMIT
             else:
                 # No verifier for this type: never report success we cannot observe.
@@ -334,6 +352,8 @@ class ActionRunner:
                     "post_state": {"state": observed, "verified": False, "timeout": True},
                 }).eq("id", action["id"]).eq("status", "executing").execute()
                 self._release_rollback_link(action["id"])
+                metrics.inc("cloudsentry_actions_total", action_type=action_type, result="verify_timeout")
+                alerts.verification_timeout(action, resource, observed)
                 self.audit.log_action(
                     event_type="action_failed",
                     actor="SYSTEM",
@@ -466,7 +486,7 @@ class ActionRunner:
         else:
             try:
                 if reverse_type == "start_ec2":
-                    success = self.cloud.start_instance(resource["provider_id"])
+                    success = self._cloud(resource).start_instance(resource["provider_id"])
                     message = "EC2 start requested." if success else "Failed to start EC2."
                     needs_verify = success
                 elif reverse_type == "remove_tags":
@@ -474,11 +494,11 @@ class ActionRunner:
                 else:
                     stored = (original.get("pre_state") or {}).get("reserved_concurrency")
                     if stored is None:
-                        success = self.cloud.remove_function_concurrency(resource["provider_id"])
+                        success = self._cloud(resource).remove_function_concurrency(resource["provider_id"])
                     else:
-                        success = self.cloud.limit_function_concurrency(resource["provider_id"], int(stored))
+                        success = self._cloud(resource).limit_function_concurrency(resource["provider_id"], int(stored))
                     if success:
-                        success = self.cloud.get_function_concurrency(resource["provider_id"]) == stored
+                        success = self._cloud(resource).get_function_concurrency(resource["provider_id"]) == stored
                     message = "Lambda concurrency restored." if success else "Failed to restore concurrency."
             except Exception:
                 logger.exception("Rollback error for %s", action_id)
@@ -502,6 +522,7 @@ class ActionRunner:
             self.db.table("optimization_actions").update({"status": "rolled_back"}).eq("id", action_id).execute()
         else:
             self._release_rollback_link(rollback_action_id)
+            alerts.rollback_failed(action_id, resource, message)
         self.audit.log_action(
             event_type="rollback_completed" if success else "rollback_failed",
             actor=user_id,
@@ -536,7 +557,7 @@ class ActionRunner:
         if not expected:
             return None
         try:
-            observed = self.cloud.get_instance_state(resource["provider_id"])
+            observed = self._cloud(resource).get_instance_state(resource["provider_id"])
         except Exception:
             logger.exception("Live state read failed for %s", resource.get("provider_id"))
             observed = None
@@ -561,9 +582,9 @@ class ActionRunner:
             # Exactly what we are about to add, so a rollback removes only that.
             pre["added_tags"] = self._missing_tags(resource)
         if action["action_type"] == "limit_lambda":
-            pre["reserved_concurrency"] = self.cloud.get_function_concurrency(resource["provider_id"])
+            pre["reserved_concurrency"] = self._cloud(resource).get_function_concurrency(resource["provider_id"])
         if action["action_type"] == "stop_ec2":
-            pre["aws_state"] = self.cloud.get_instance_state(resource["provider_id"])
+            pre["aws_state"] = self._cloud(resource).get_instance_state(resource["provider_id"])
         return pre
 
     def _missing_tags(self, resource: dict) -> dict:
@@ -577,16 +598,16 @@ class ActionRunner:
         action_type = action["action_type"]
         provider_id = resource["provider_id"]
         if action_type == "stop_ec2":
-            success = self.cloud.stop_instance(provider_id)
+            success = self._cloud(resource).stop_instance(provider_id)
             return success, "EC2 stop requested." if success else "Failed to stop EC2.", True
         if action_type == "start_ec2":
-            success = self.cloud.start_instance(provider_id)
+            success = self._cloud(resource).start_instance(provider_id)
             return success, "EC2 start requested." if success else "Failed to start EC2.", True
         if action_type == "limit_lambda":
             limit = settings.LAMBDA_CONCURRENCY_LIMIT
             if limit <= 0:
                 return False, "Refusing to set Lambda concurrency <= 0 (hard disable).", False
-            success = self.cloud.limit_function_concurrency(provider_id, limit)
+            success = self._cloud(resource).limit_function_concurrency(provider_id, limit)
             return success, f"Lambda concurrency limited to {limit}." if success else "Failed to limit concurrency.", True
         if action_type == "apply_tags":
             new_tags = self._missing_tags(resource)
@@ -596,11 +617,11 @@ class ActionRunner:
             if not tag_target:
                 return False, "Resource ARN unknown; cannot tag.", False
             rtype = resource["resource_type"]
-            if not self.cloud.apply_tags(tag_target, new_tags, rtype):
+            if not self._cloud(resource).apply_tags(tag_target, new_tags, rtype):
                 return False, "Failed to apply tags.", False
             # Read back: a write the provider accepted but did not persist (or
             # that a concurrent writer overwrote) must not be reported as done.
-            live = self.cloud.get_tags(tag_target, rtype)
+            live = self._cloud(resource).get_tags(tag_target, rtype)
             if live is None or any(live.get(k) != v for k, v in new_tags.items()):
                 return False, "Tag write not confirmed by read-back.", False
             self.db.table("resources").update({"tags": live}).eq("id", resource["id"]).execute()
@@ -625,14 +646,14 @@ class ActionRunner:
         rtype = resource["resource_type"]
         if not target:
             return False, "Resource ARN unknown; cannot remove tags."
-        live = self.cloud.get_tags(target, rtype)
+        live = self._cloud(resource).get_tags(target, rtype)
         if live is None:
             return False, "Could not read current tags; nothing removed."
         to_remove = sorted(k for k, v in added.items() if live.get(k) == v)
         kept = sorted(k for k in added if k not in to_remove)
-        if to_remove and not self.cloud.remove_tags(target, to_remove, rtype):
+        if to_remove and not self._cloud(resource).remove_tags(target, to_remove, rtype):
             return False, "Failed to remove tags."
-        after = self.cloud.get_tags(target, rtype)
+        after = self._cloud(resource).get_tags(target, rtype)
         if after is None or any(k in after for k in to_remove):
             return False, "Tag removal not confirmed by read-back."
         self.db.table("resources").update({"tags": after}).eq("id", resource["id"]).execute()
@@ -655,6 +676,11 @@ class ActionRunner:
             payload["verified_at"] = executed_at
         self.db.table("optimization_actions").update(payload).eq("id", action_id).execute()
         event = "action_completed" if success else ("action_blocked" if blocked else "action_failed")
+        metrics.inc("cloudsentry_actions_total", action_type=action["action_type"],
+                    result="dry_run" if dry else event.removeprefix("action_"))
+        # A block is the safety layer working; a failure needs a human.
+        if not success and not blocked:
+            alerts.action_failed(action, resource, message)
         self.audit.log_action(
             event_type=event,
             actor=actor,
