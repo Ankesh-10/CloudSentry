@@ -88,6 +88,24 @@ def rollback_failed(action_id: str, resource: dict, message: str) -> bool:
                 f":x: Rollback of action {action_id} on `{resource.get('provider_id')}` failed: {message}")
 
 
+def approvals_needed(items: list[dict]) -> Optional[bool]:
+    """One message per policy cycle listing new proposals that wait for an
+    operator. Without it they sit unseen until APPROVAL_TTL_HOURS expires them.
+    items: [{"id", "action_type", "provider_id", "risk_level"}]."""
+    if not items:
+        return None
+    shown = items[:10]
+    lines = [f"• `{i.get('action_type')}` on `{i.get('provider_id')}` (risk {i.get('risk_level') or '?'})"
+             for i in shown]
+    if len(items) > len(shown):
+        lines.append(f"• ...and {len(items) - len(shown)} more")
+    # Keyed by the first new action id: every cycle with new proposals alerts
+    # once; the throttle only stops the same batch being re-sent.
+    return send(f"approvals:{items[0].get('id')}",
+                f":hourglass: {len(items)} action(s) need approval (expire in {settings.APPROVAL_TTL_HOURS}h):\n"
+                + "\n".join(lines))
+
+
 def emergency_stop(actor: str, persisted: bool) -> bool:
     note = "" if persisted else " (NOT persisted to the database: other replicas may still be running!)"
     return send(f"estop:{time.time()}", f":octagonal_sign: Emergency stop by {actor}{note}")

@@ -128,6 +128,30 @@ def test_job_alert_only_after_repeated_failures(webhook):
     assert "discovery" in webhook[0][1]["text"]
 
 
+def test_new_proposals_needing_approval_alert_once_per_cycle(fake_db, webhook):
+    from backend.app.services.policy_engine import PolicyEngine
+    fake_db.rows("policies").append({
+        "id": "p-ebs", "name": "Review unused EBS", "enabled": True, "resource_type": "ebs",
+        "anomaly_type": "unused_volume", "conditions": {"field": "resource.state", "op": "eq", "value": "available"},
+        "action_type": "recommend_review", "risk_level": "LOW", "requires_approval": True, "priority": 100})
+    for i in range(2):
+        fake_db.rows("resources").append({"id": f"v{i}", "provider_id": f"vol-{i}", "resource_type": "ebs",
+                                          "state": "available", "protected": False, "tags": {}, "metadata": {}})
+        fake_db.rows("anomalies").append({"id": f"an{i}", "resource_id": f"v{i}", "anomaly_type": "unused_volume",
+                                          "status": "active", "detected_at": f"2026-01-0{i + 1}T00:00:00+00:00"})
+    assert PolicyEngine().evaluate_all() == 2
+    assert len(webhook) == 1
+    text = webhook[0][1]["text"]
+    assert "2 action(s) need approval" in text and "vol-0" in text and "vol-1" in text
+    PolicyEngine().evaluate_all()  # nothing new -> no repeat alert
+    assert len(webhook) == 1
+
+
+def test_no_alert_when_nothing_needs_approval(fake_db, webhook):
+    assert alerts.approvals_needed([]) is None
+    assert webhook == []
+
+
 def test_emergency_stop_alerts(client, webhook):
     assert client.post("/api/v1/system/emergency-stop", headers=_h("viewer")).status_code == 200
     assert any("Emergency stop by USER:viewer" in body["text"] for _, body in webhook)

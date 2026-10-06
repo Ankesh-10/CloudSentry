@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from backend.app.db.pagination import fetch_all
 from backend.app.db.supabase_client import get_supabase_client
-from backend.app.services import runtime_config
+from backend.app.services import alerts, runtime_config
 from backend.app.services.audit_logger import AuditLogger
 from backend.app.services.cost_estimator import CostEstimationService
 from backend.app.services.safety_layer import SafetyLayer
@@ -155,6 +155,7 @@ class PolicyEngine:
 
         now = datetime.now(timezone.utc)
         created = 0
+        needs_approval: list[dict] = []
         for anomaly in anomalies:
             resource = anomaly.get("resources") or {}
             if not resource:
@@ -217,7 +218,12 @@ class PolicyEngine:
                 response_status="pending_approval" if matched_policy["requires_approval"] else "pending",
                 message=f"Policy '{matched_policy.get('name')}' proposed {action_type}",
             )
+            if matched_policy["requires_approval"]:
+                needs_approval.append({"id": (inserted.data or [{}])[0].get("id"), "action_type": action_type,
+                                       "provider_id": resource.get("provider_id"),
+                                       "risk_level": matched_policy["risk_level"]})
 
         if created:
             logger.info("Proposed %s new optimization actions.", created)
+        alerts.approvals_needed(needs_approval)
         return created
