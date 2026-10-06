@@ -139,6 +139,35 @@ def test_discovery_covers_every_configured_region(aws, fake_db, monkeypatch):
     assert regions == {us: "us-east-1", eu: "eu-west-1"}
 
 
+def _function(region, name="api"):
+    import io
+    import zipfile
+    iam = boto3.client("iam", region_name="us-east-1")
+    try:
+        role = iam.create_role(RoleName="r", AssumeRolePolicyDocument="{}")["Role"]["Arn"]
+    except iam.exceptions.EntityAlreadyExistsException:
+        role = iam.get_role(RoleName="r")["Role"]["Arn"]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("h.py", "def h(e, c): return 1")
+    boto3.client("lambda", region_name=region).create_function(
+        FunctionName=name, Runtime="python3.11", Role=role, Handler="h.h", Code={"ZipFile": buf.getvalue()})
+
+
+def test_same_function_name_in_two_regions_is_two_resources(aws, fake_db, monkeypatch):
+    """Lambda names are only unique per region; neither copy may be dropped,
+    and a second run must update, not duplicate or delete, them."""
+    from backend.app.services.discovery import DiscoveryService
+    monkeypatch.setattr(settings, "AWS_REGIONS", "eu-west-1")
+    _function("us-east-1")
+    _function("eu-west-1")
+    DiscoveryService().run()
+    DiscoveryService().run()
+    rows = [r for r in fake_db.rows("resources") if r["resource_type"] == "lambda"]
+    assert sorted((r["region"], r["provider_id"], r["state"]) for r in rows) == [
+        ("eu-west-1", "api", "available"), ("us-east-1", "api", "available")]
+
+
 def test_failed_region_does_not_mark_other_resources_deleted(aws, fake_db, monkeypatch):
     from backend.app.adapters.aws import AWSAdapter
     from backend.app.services.discovery import DiscoveryError, DiscoveryService

@@ -62,6 +62,18 @@ def test_migration_010_turns_ebs_policy_into_a_recommendation():
     assert "recommend_review" in _vocab(SQL_009, "policies_action_type_check")
 
 
+def test_discovery_upserts_on_the_region_scoped_resource_key():
+    """The upsert's on_conflict columns must be exactly a unique constraint,
+    or PostgREST rejects every discovery write."""
+    from backend.app.services import discovery
+    with open(discovery.__file__, encoding="utf-8") as f:
+        conflict = re.search(r'conflict = "([^"]+)"', f.read()).group(1)
+    sql = _sql("012_resource_identity_per_region.sql")
+    cols = re.search(r"resources_type_region_provider_id_key UNIQUE \(([^)]+)\)", sql).group(1)
+    assert [c.strip() for c in cols.split(",")] == conflict.split(",")
+    assert "ALTER COLUMN region SET NOT NULL" in sql
+
+
 def test_migrations_are_numbered_contiguously():
     nums = sorted(int(f[:3]) for f in os.listdir(MIGRATIONS) if re.match(r"^\d{3}_.*\.sql$", f))
     assert nums == list(range(1, len(nums) + 1))

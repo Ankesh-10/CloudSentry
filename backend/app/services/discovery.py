@@ -60,11 +60,13 @@ class DiscoveryService:
         now = datetime.now(timezone.utc).isoformat()
         existing = fetch_all(
             lambda: self.db.table("resources")
-            .select("id, provider_id, state")
+            .select("id, provider_id, region, state")
             .eq("resource_type", resource_type)
             .order("id")
         )
-        existing_map = {r["provider_id"]: r for r in existing}
+        # Identity is (region, provider_id): Lambda names and RDS identifiers
+        # are only unique within a region (migration 012).
+        existing_map = {(r.get("region"), r["provider_id"]): r for r in existing}
 
         # New and existing rows are written separately with uniform keys:
         # supabase-py bulk writes fill keys missing from some rows with NULL,
@@ -72,13 +74,14 @@ class DiscoveryService:
         inserts: List[Dict[str, Any]] = []
         updates: List[Dict[str, Any]] = []
         audit_payload = []
-        seen_ids = set()
+        seen_keys = set()
 
         for res in discovered:
             provider_id = res.get("id")
-            if not provider_id or provider_id in seen_ids:
+            key = (res.get("region"), provider_id)
+            if not provider_id or key in seen_keys:
                 continue
-            seen_ids.add(provider_id)
+            seen_keys.add(key)
             state = res.get("state")
             payload = {
                 "account_id": account_id,
@@ -91,8 +94,8 @@ class DiscoveryService:
                 "metadata": res.get("metadata") or {},
                 "last_seen": now,
             }
-            if provider_id in existing_map:
-                old = existing_map[provider_id]
+            if key in existing_map:
+                old = existing_map[key]
                 if old["state"] != state:
                     audit_payload.append({
                         "event_type": "state_change",
@@ -105,7 +108,7 @@ class DiscoveryService:
                 payload["first_seen"] = now
                 inserts.append(payload)
 
-        conflict = "resource_type,provider_id"
+        conflict = "resource_type,region,provider_id"
         if inserts:
             self.db.table("resources").upsert(inserts, on_conflict=conflict).execute()
         if updates:
@@ -114,8 +117,8 @@ class DiscoveryService:
         # Resources that disappeared from a *successful* listing no longer exist
         # (terminated instances age out of DescribeInstances, deleted buckets...).
         gone = [
-            row for pid, row in existing_map.items()
-            if pid not in seen_ids and row.get("state") not in GONE_STATES
+            row for key, row in existing_map.items()
+            if key not in seen_keys and row.get("state") not in GONE_STATES
         ]
         for row in gone:
             self.db.table("resources").update({"state": "deleted"}).eq("id", row["id"]).execute()
