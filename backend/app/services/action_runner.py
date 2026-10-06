@@ -72,8 +72,6 @@ class ActionRunner:
             self._regional[region] = get_cloud_adapter(region)
         return self._regional[region]
 
-    # ------------------------------------------------------------------ execute
-
     # ------------------------------------------------------------------- expiry
 
     def _ttl(self) -> timedelta:
@@ -125,6 +123,8 @@ class ActionRunner:
             .execute()
         )
         return sum(1 for row in res.data or [] if self.is_expired(row) and self.expire(row))
+
+    # ------------------------------------------------------------------ execute
 
     def execute_pending_auto(self) -> int:
         """Execute pending actions that do not require approval."""
