@@ -281,7 +281,11 @@ class AnomalyDetectorService:
             .execute()
         )
         if existing.data:
+            # Severity follows the latest evidence: a LOW spike that grew into
+            # a HIGH one must not keep showing (and sorting) as LOW.
             self.db.table("anomalies").update({
+                "severity": result.get("severity", "LOW"),
+                "model_version": result.get("model_version", "unknown"),
                 "anomaly_score": score,
                 "confidence": confidence,
                 "reason": result.get("reason", ""),

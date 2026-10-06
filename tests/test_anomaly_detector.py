@@ -45,6 +45,17 @@ def test_anomaly_is_updated_not_duplicated(detector, fake_db):
     assert _types(fake_db) == ["idle_compute"]
 
 
+def test_redetection_refreshes_severity(detector, fake_db):
+    low = {"is_anomaly": True, "anomaly_type": "unusual_cpu_spike", "severity": "LOW", "score": 3.0,
+           "confidence": 0.5, "model_version": "zscore_fallback"}
+    detector._record_anomaly("r1", low, NOW.isoformat(), {})
+    detector._record_anomaly("r1", {**low, "severity": "HIGH", "score": 9.0, "model_version": "ewma_fallback"},
+                             (NOW + timedelta(minutes=5)).isoformat(), {})
+    rows = [a for a in fake_db.rows("anomalies") if a["anomaly_type"] == "unusual_cpu_spike"]
+    assert len(rows) == 1
+    assert (rows[0]["severity"], rows[0]["model_version"]) == ("HIGH", "ewma_fallback")
+
+
 def test_stale_metrics_do_not_raise_idle(detector, fake_db):
     detector.process_resource(_resource(tags={"Project": "p", "Owner": "o"}),
                               _idle_records(end=NOW - timedelta(hours=2)), NOW)
