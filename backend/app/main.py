@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from backend.app import metrics as app_metrics
 from backend.app import scheduler
-from backend.app.api import actions, anomalies, audit, dashboard, metrics, resources, system
+from backend.app.api import actions, anomalies, audit, dashboard, metrics, policies, resources, system
 from backend.app.auth import require_viewer
 from backend.app.config import settings
 from backend.app.db.asyncpg_pool import close_db_pool, init_db_pool, is_transaction_pooler
@@ -168,6 +168,7 @@ ROUTERS = [
     (dashboard.router, "/api/v1/dashboard", "dashboard"),
     (system.router, "/api/v1/system", "system"),
     (audit.router, "/api/v1/audit-logs", "audit-logs"),
+    (policies.router, "/api/v1/policies", "policies"),
 ]
 # Longest first so the most specific prefix wins in _route_template.
 ROUTER_PREFIXES = sorted((p for _, p, _ in ROUTERS), key=len, reverse=True)
