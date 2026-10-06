@@ -8,8 +8,7 @@ Like the runtime config, a change that lets the agent do more (enabling a
 policy, or letting its actions run without approval) waits for a second
 operator when REQUIRE_TWO_PERSON_CONFIG is on. Every change is audited first.
 """
-import json
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, List, Optional
 from uuid import UUID
 
@@ -21,12 +20,10 @@ from backend.app.auth import actor_label, require_operator
 from backend.app.config import settings
 from backend.app.db.supabase_client import get_supabase_client
 from backend.app.rate_limit import rate_limit
+from backend.app.services import two_person
 from backend.app.services.audit_logger import AuditLogger, AuditWriteError
-from backend.app.services.runtime_config import PENDING_PREFIX, PENDING_TTL
 
 router = APIRouter()
-
-POLICY_PENDING_PREFIX = PENDING_PREFIX + "POLICY:"
 
 
 class Policy(BaseModel):
@@ -63,22 +60,12 @@ def _loosens(field: str, value: bool, current) -> bool:
     return value is False and current is not False  # requires_approval -> false
 
 
-def _pending_key(policy_id: str, field: str) -> str:
-    return f"{POLICY_PENDING_PREFIX}{policy_id}:{field}"
-
-
-def _live_pending(db, key: str, value: bool) -> Optional[dict]:
-    res = db.table("system_config").select("key, value").eq("key", key).execute()
-    if not res.data:
-        return None
+def _audit(event: str, actor: str, params: dict, message: str, detail: str) -> None:
     try:
-        pending = json.loads(res.data[0].get("value") or "")
-        requested_at = datetime.fromisoformat(pending["requested_at"])
-    except (TypeError, ValueError, KeyError):
-        return None
-    if pending.get("value") is not value or datetime.now(timezone.utc) - requested_at > PENDING_TTL:
-        return None
-    return pending
+        AuditLogger().log_action(event_type=event, actor=actor, request_params=params, message=message,
+                                 required=True)
+    except AuditWriteError:
+        raise HTTPException(status_code=503, detail=f"Audit log unavailable; {detail}")
 
 
 @router.get("/", response_model=List[Policy])
@@ -100,43 +87,30 @@ def update_policy(policy_id: UUID, payload: PolicyUpdate, user: dict = Depends(r
     (field, value), = changes.items()
     policy = _get(policy_id)
     pid, actor = str(policy_id), actor_label(user)
-    db = get_supabase_client()
     params = {"policy_id": pid, "policy": policy.get("name"), "field": field,
               "from": policy.get(field), "to": value}
+    name = policy.get("name")
 
-    confirmed_from = None
+    pending_key = None
     if settings.REQUIRE_TWO_PERSON_CONFIG and _loosens(field, value, policy.get(field)):
-        key = _pending_key(pid, field)
-        pending = _live_pending(db, key, value)
+        pending_key = f"POLICY:{pid}:{field}"
+        pending = two_person.live_request(pending_key, value)
         if pending is None:
-            now = datetime.now(timezone.utc)
-            try:
-                AuditLogger().log_action(event_type="policy_change_requested", actor=actor, request_params=params,
-                                         message=f"{field}={value} on policy '{policy.get('name')}' "
-                                                 "requested; awaiting a second operator", required=True)
-            except AuditWriteError:
-                raise HTTPException(status_code=503, detail="Audit log unavailable; change not requested")
-            db.table("system_config").upsert({
-                "key": key,
-                "value": json.dumps({"value": value, "requested_by": actor, "requested_at": now.isoformat()}),
-                "updated_at": now.isoformat(),
-            }, on_conflict="key").execute()
+            _audit("policy_change_requested", actor, params,
+                   f"{field}={value} on policy '{name}' requested; awaiting a second operator",
+                   "change not requested")
+            expires_at = two_person.record_request(pending_key, value, actor)
             return JSONResponse(status_code=202, content={
                 "status": "pending_confirmation", "policy_id": pid, "field": field, "value": value,
-                "expires_at": (now + PENDING_TTL).isoformat()})
+                "expires_at": expires_at})
         if pending.get("requested_by") == actor:
             raise HTTPException(status_code=409, detail="A different operator must confirm this change")
-        confirmed_from = pending.get("requested_by")
-        params["requested_by"] = confirmed_from
+        params["requested_by"] = pending.get("requested_by")
 
-    try:
-        AuditLogger().log_action(event_type="policy_changed", actor=actor, request_params=params,
-                                 message=f"Policy '{policy.get('name')}' {field} set to {value}", required=True)
-    except AuditWriteError:
-        raise HTTPException(status_code=503, detail="Audit log unavailable; change not applied")
-    res = db.table("policies").update({field: value}).eq("id", pid).execute()
-    if confirmed_from is not None:
-        db.table("system_config").delete().eq("key", _pending_key(pid, field)).execute()
+    _audit("policy_changed", actor, params, f"Policy '{name}' {field} set to {value}", "change not applied")
+    res = get_supabase_client().table("policies").update({field: value}).eq("id", pid).execute()
+    if pending_key:
+        two_person.clear(pending_key)
     if not res.data:
         raise HTTPException(status_code=404, detail="Policy not found")
     return res.data[0]
