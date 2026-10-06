@@ -61,6 +61,7 @@ Sign in with a Supabase user whose id is in `VIEWER_USER_IDS` / `OPERATOR_USER_I
 | 009 | Vocabulary CHECK constraints, explicit grants, role-gated reads (`app_metadata.cloudsentry_role`) |
 | 010 | Unused-EBS policy becomes `recommend_review` |
 | 011 | `schema_migrations`, persisted job status (`job_runs`) |
+| 012 | Resource identity is `(resource_type, region, provider_id)`: same-named Lambda/RDS in two regions are two resources |
 
 ## Access control
 
@@ -74,7 +75,9 @@ Every `/api/v1/*` route (except `/health` and `/health/live`) needs `Authorizati
 * Plain Supabase sign-up grants **nothing**; anonymous sessions are always rejected. `REQUIRE_VIEWER_ROLE=false` lets any signed-in user read (only if sign-up is closed).
 * `app_metadata` is settable only with the service-role key; `user_metadata` never grants roles.
 * Direct Supabase reads/Realtime (e.g. a frontend) are gated by migration 009 on `app_metadata.cloudsentry_role`; the `*_USER_IDS` lists apply to the API only.
-* **Two-person rule:** enabling `GLOBAL_AUTOMATION_ENABLED` or disabling `DRY_RUN_MODE` returns `202 pending_confirmation`; a *different* operator must repeat the same change within an hour. An emergency stop cancels a pending enable.
+* **Two-person rule:** any change that lets the agent do more returns `202 pending_confirmation`, and a *different* operator must repeat the same change within an hour: enabling `GLOBAL_AUTOMATION_ENABLED`, disabling `DRY_RUN_MODE`, raising a cap (`MAX_ACTIONS_PER_DAY`, budgets, CloudWatch caps) or shortening `ACTION_COOLDOWN_MINUTES`, enabling a policy or removing its approval step, and unprotecting a resource. Tightening is always immediate. `GET /system/config/pending` lists open requests; any operator can cancel one. An emergency stop cancels a pending enable.
+* **Audit:** every approval/rejection, proposal (`action_proposed`), policy toggle, protection change and cancellation is written to `audit_logs` *before* the change; if the audit write fails, the change is refused (503).
+* **Never stopped automatically:** instances owned by an Auto Scaling group, EKS node group, Karpenter or an EC2/Spot fleet (stopping one makes the group replace it).
 
 ## API
 
@@ -85,9 +88,15 @@ Every `/api/v1/*` route (except `/health` and `/health/live`) needs `Authorizati
 | GET | `/api/v1/system/health` | viewer (jobs, models, budget, issues) |
 | GET | `/api/v1/system/config` | viewer |
 | PATCH | `/api/v1/system/config` · `/api/v1/system/{key}` | operator (two-person for unsafe changes) |
+| GET | `/api/v1/system/config/pending` | viewer (changes awaiting a second operator) |
+| POST | `/api/v1/system/config/pending/{key}/cancel` | operator (audited) |
+| GET | `/api/v1/policies/` · `/{id}` | viewer |
+| PATCH | `/api/v1/policies/{id}` (`{"enabled": bool}` or `{"requires_approval": bool}`) | operator (two-person when loosening) |
 | POST | `/api/v1/system/emergency-stop` | viewer (always applied; rate-limited) |
 | GET | `/api/v1/resources/` · `/{id}` | viewer |
-| POST | `/api/v1/resources/discover` | operator (2/min, one at a time) |
+| PATCH | `/api/v1/resources/{id}/protection` (`{"protected": bool}`) | operator (unprotect is two-person) |
+| POST | `/api/v1/resources/discover` | operator (2/min, one at a time; `202`, runs in the background) |
+| GET | `/api/v1/resources/discover/status` | viewer (`running` / `success` / `partial_failure` / `failed`) |
 | GET | `/api/v1/metrics/{id}` · `/{id}/summary` | viewer |
 | GET | `/api/v1/anomalies/` · `/{id}` | viewer |
 | PATCH | `/api/v1/anomalies/{id}` · `/{id}/status` | operator |
@@ -97,7 +106,7 @@ Every `/api/v1/*` route (except `/health` and `/health/live`) needs `Authorizati
 | GET | `/api/v1/audit-logs/` (filters: `event_type`, `actor`, `request_id`, `since`, `until`, `resource_id`, `action_id`) | viewer |
 | GET | `/metrics` | Prometheus text; only when `METRICS_TOKEN` is set, with `Authorization: Bearer <METRICS_TOKEN>` |
 
-`/docs` and `/openapi.json` are off unless `EXPOSE_API_DOCS=true` (on in `docker-compose.yml` for local dev). Every response carries `X-Request-ID`; audit rows record it with the client IP.
+`/docs` and `/openapi.json` are off unless `EXPOSE_API_DOCS=true` (on in `docker-compose.yml` for local dev). Every response carries `X-Request-ID`; audit rows record it with the client IP. List endpoints (resources, anomalies, actions, audit logs) return the unpaged total in `X-Total-Count`.
 
 ## Configuration
 
@@ -115,7 +124,9 @@ All settings are environment variables (see `.env.example` for the full, comment
 | `OPERATOR_USER_IDS` / `VIEWER_USER_IDS` | — | Role allowlists (comma-separated Supabase user ids) |
 | `AWS_REGIONS` | default region | Extra regions to discover/monitor (IAM policy must allow them) |
 | `RATE_LIMIT_PER_MINUTE` | `300` | Per-client-IP limit, per process |
-| `ALERT_WEBHOOK_URL` | — | Slack-compatible webhook: failed actions, verification timeouts, rollbacks, emergency stop, failing jobs |
+| `MAX_CW_METRICS_PER_HOUR` | `2000` | CloudWatch cost cap: GetMetricData bills per metric (~$15/month at 2000) |
+| `ML_IDLE_WINDOW_HOURS` / `ML_IDLE_CPU_THRESHOLD_PCT` | `24` / `5` | EC2 is idle only if CPU stays below the threshold for the whole window (set `2` for a quick demo) |
+| `ALERT_WEBHOOK_URL` | — | Slack-compatible webhook: actions awaiting approval, failed actions, verification timeouts, rollbacks, emergency stop, failing jobs |
 | `METRICS_TOKEN` | — | Enables `/metrics` |
 | `AUDIT_RETENTION_DAYS` / `HISTORY_RETENTION_DAYS` | `365` | Retention (minimum 90) |
 | `ML_MODEL_PATH` | `<repo>/models` | Must be persistent (Render: the disk in `render.yaml`) |

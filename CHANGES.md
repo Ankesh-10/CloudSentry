@@ -7,6 +7,16 @@
 > observability, GCP and multi-region). Line references and the
 > docs-vs-implementation matrix below describe the old code; the README is the
 > current reference.
+>
+> **Follow-up review (2026-10-04)** fixed: Auto Scaling/EKS/fleet instances
+> could be auto-stopped (and so replaced); `limit_lambda` could raise a tighter
+> existing reservation; same-named Lambda/RDS in two regions collided
+> (migration 012); approvals/rejections/proposals were not audited; one
+> operator could loosen caps alone; the CloudWatch cap counted calls, not billed
+> metrics; dependencies had no major-version bounds; an unwritable model disk
+> was silent; the idle window was 2 h. Added: approval-needed alerts, a
+> policies API, pending-change listing/cancel, resource protection API,
+> background discovery with status, `X-Total-Count` on lists.
 
 ## Executive Summary
 
