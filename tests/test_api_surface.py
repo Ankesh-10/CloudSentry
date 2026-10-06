@@ -154,9 +154,9 @@ def test_discover_is_rate_limited_per_user(client, monkeypatch):
     monkeypatch.setattr(DiscoveryService, "__init__", lambda self: None)
     monkeypatch.setattr(DiscoveryService, "run", lambda self: {"ec2": 0, "errors": []})
     codes = [client.post("/api/v1/resources/discover", headers=_h("operator-1")).status_code for _ in range(3)]
-    assert codes == [200, 200, 429]
+    assert codes == [202, 202, 429]
     # A different operator has their own budget.
-    assert client.post("/api/v1/resources/discover", headers=_h("operator-2")).status_code == 200
+    assert client.post("/api/v1/resources/discover", headers=_h("operator-2")).status_code == 202
 
 
 def test_discover_rejects_overlapping_runs(client):
@@ -178,11 +178,25 @@ def test_discover_partial_failure_hides_details(client, monkeypatch):
     monkeypatch.setattr(DiscoveryService, "__init__", lambda self: None)
     monkeypatch.setattr(DiscoveryService, "run", fail)
     res = client.post("/api/v1/resources/discover", headers=_h("operator-1"))
-    assert res.status_code == 502
-    assert res.json() == {"detail": "Discovery partially failed"}
+    assert res.status_code == 202 and res.json() == {"status": "started", "result": None}
+    status = client.get("/api/v1/resources/discover/status", headers=_h("user-1")).json()
+    # Which resource types failed goes to the log, not to the client.
+    assert status["status"] == "partial_failure" and status["result"] is None
+    assert status["started_by"] == "USER:operator-1" and status["finished_at"]
     # The lock is released after a failure.
     assert resources._discovery_lock.acquire(blocking=False)
     resources._discovery_lock.release()
+
+
+def test_discover_runs_in_background_and_reports_result(client, monkeypatch):
+    from backend.app.services.discovery import DiscoveryService
+    monkeypatch.setattr(DiscoveryService, "__init__", lambda self: None)
+    monkeypatch.setattr(DiscoveryService, "run", lambda self: {"ec2": {"inserted": 2}, "errors": []})
+    assert client.post("/api/v1/resources/discover", headers=_h("operator-1")).status_code == 202
+    status = client.get("/api/v1/resources/discover/status", headers=_h("user-1")).json()
+    assert status["status"] == "success" and status["result"]["ec2"] == {"inserted": 2}
+    # Viewers can poll, but only operators can start a run.
+    assert client.post("/api/v1/resources/discover", headers=_h("user-1")).status_code == 403
 
 
 def test_emergency_stop_is_rate_limited(client):

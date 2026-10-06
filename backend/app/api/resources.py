@@ -1,12 +1,13 @@
 import logging
 import threading
+from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 
-from backend.app.auth import require_operator
+from backend.app.auth import actor_label, require_operator
 from backend.app.db.asyncpg_pool import get_pool
 from backend.app.db.supabase_client import get_supabase_client
 from backend.app.rate_limit import rate_limit
@@ -73,22 +74,44 @@ async def get_resource(resource_id: UUID):
 # One manual discovery at a time per process: each run fans out into many
 # provider API calls, and overlapping runs only multiply throttling and cost.
 _discovery_lock = threading.Lock()
+# Outcome of the latest manual run, polled via GET /discover/status. A large
+# account takes minutes to list; holding the request open that long hits proxy
+# timeouts (and the client retries, starting another run).
+_discovery_state: dict = {"status": "idle", "started_at": None, "finished_at": None,
+                          "started_by": None, "result": None}
 
 
-@router.post("/discover", dependencies=[rate_limit("discover", 2)])
-def trigger_discovery(user: dict = Depends(require_operator)):
-    if not _discovery_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Discovery is already running")
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _run_discovery() -> None:
     try:
         result = DiscoveryService().run()
+        _discovery_state.update(status="success", result=result)
     except DiscoveryError as e:
         # Partial success: some resource types failed at the provider. Which
         # ones goes to the log, not to the client.
         logger.warning("Manual discovery partially failed: %s", e.summary)
-        raise HTTPException(status_code=502, detail="Discovery partially failed")
+        _discovery_state.update(status="partial_failure", result=None)
     except Exception:
         logger.exception("Manual discovery failed")
-        raise HTTPException(status_code=500, detail="Discovery failed")
+        _discovery_state.update(status="failed", result=None)
     finally:
+        _discovery_state["finished_at"] = _now_iso()
         _discovery_lock.release()
-    return {"status": "success", "result": result}
+
+
+@router.post("/discover", status_code=202, dependencies=[rate_limit("discover", 2)])
+def trigger_discovery(background_tasks: BackgroundTasks, user: dict = Depends(require_operator)):
+    if not _discovery_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Discovery is already running")
+    _discovery_state.update(status="running", started_at=_now_iso(), finished_at=None,
+                            started_by=actor_label(user), result=None)
+    background_tasks.add_task(_run_discovery)
+    return {"status": "started", "result": None}
+
+
+@router.get("/discover/status")
+def discovery_status():
+    return dict(_discovery_state)
