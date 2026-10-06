@@ -163,3 +163,32 @@ def test_audit_log_rejects_bad_params(client, query):
 
 def test_audit_logs_need_viewer(client, fake_db):
     assert client.get("/api/v1/audit-logs/", headers=_h("stranger")).status_code == 403
+
+
+# -- approval decisions are audited -----------------------------------------------------
+
+AID = "55555555-5555-5555-5555-555555555555"
+
+
+def _pending(fake_db):
+    fake_db.rows("optimization_actions").append({
+        "id": AID, "resource_id": RID, "action_type": "recommend_review", "status": "pending_approval",
+        "requires_approval": True, "created_at": NOW.isoformat()})
+
+
+@pytest.mark.parametrize("approved,event", [(True, "action_approved"), (False, "action_rejected")])
+def test_approval_decisions_are_audited(client, fake_db, approved, event):
+    _pending(fake_db)
+    res = client.post(f"/api/v1/actions/{AID}/approve", json={"approved": approved}, headers=_h("operator-1"))
+    assert res.status_code == 200
+    log = next(l for l in fake_db.rows("audit_logs") if l["event_type"] == event)
+    assert log["actor"] == "USER:operator-1" and log["action_id"] == AID
+    assert log["request_params"] == {"from": "pending_approval", "to": event.removeprefix("action_")}
+
+
+def test_decision_is_not_applied_without_an_audit_record(client, fake_db):
+    _pending(fake_db)
+    fake_db.fail_tables["audit_logs"] = True
+    res = client.post(f"/api/v1/actions/{AID}/approve", json={"approved": False}, headers=_h("operator-1"))
+    assert res.status_code == 503
+    assert fake_db.rows("optimization_actions")[0]["status"] == "pending_approval"

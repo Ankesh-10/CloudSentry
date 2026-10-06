@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from backend.app.db.pagination import fetch_all
 from backend.app.db.supabase_client import get_supabase_client
 from backend.app.services import runtime_config
+from backend.app.services.audit_logger import AuditLogger
 from backend.app.services.cost_estimator import CostEstimationService
 from backend.app.services.safety_layer import SafetyLayer
 
@@ -32,6 +33,7 @@ class PolicyEngine:
         self.db = get_supabase_client()
         self.safety = SafetyLayer()
         self.costs = CostEstimationService()
+        self.audit = AuditLogger()
 
     def _evaluate_condition(self, condition: dict, context: dict) -> bool:
         if not isinstance(condition, dict) or not condition:
@@ -185,7 +187,7 @@ class PolicyEngine:
                 savings = round(self.costs.estimate_hourly(resource) * HOURS_PER_MONTH, 2)
 
             try:
-                self.db.table("optimization_actions").insert({
+                inserted = self.db.table("optimization_actions").insert({
                     "anomaly_id": anomaly["id"],
                     "resource_id": resource["id"],
                     "action_type": action_type,
@@ -201,6 +203,20 @@ class PolicyEngine:
                 logger.warning("Could not create %s for %s: %s", action_type, resource["id"], e)
                 continue
             created += 1
+            # One row per proposal (an anomaly is proposed for at most once
+            # while an action for it is live), so this cannot flood the trail.
+            self.audit.log_action(
+                event_type="action_proposed",
+                actor="SYSTEM",
+                resource_id=resource["id"],
+                action_id=(inserted.data or [{}])[0].get("id"),
+                aws_api_call=action_type,
+                request_params={"policy_id": matched_policy.get("id"), "policy": matched_policy.get("name"),
+                                "anomaly_id": anomaly["id"],
+                                "requires_approval": bool(matched_policy["requires_approval"])},
+                response_status="pending_approval" if matched_policy["requires_approval"] else "pending",
+                message=f"Policy '{matched_policy.get('name')}' proposed {action_type}",
+            )
 
         if created:
             logger.info("Proposed %s new optimization actions.", created)

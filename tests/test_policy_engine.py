@@ -61,8 +61,12 @@ def test_proposes_even_with_kill_switch_off(seeded):
     action = seeded.rows("optimization_actions")[0]
     assert action["action_type"] == "stop_ec2" and action["status"] == "pending"
     assert action["estimated_savings_usd"] == pytest.approx(0.0116 * 730, rel=1e-3)
-    # No audit spam for proposals.
-    assert seeded.rows("audit_logs") == []
+    # Exactly one audit row per proposal, naming the policy that made it.
+    logs = seeded.rows("audit_logs")
+    assert [l["event_type"] for l in logs] == ["action_proposed"]
+    assert logs[0]["action_id"] == action["id"] and logs[0]["request_params"]["policy_id"] == "p-idle"
+    PolicyEngine().evaluate_all()  # nothing new proposed -> nothing new audited
+    assert len(seeded.rows("audit_logs")) == 1
 
 
 def test_no_reproposal_after_completion(seeded):
