@@ -81,9 +81,28 @@ def _is_safer(key: str, value: Any) -> bool:
     return (key == "GLOBAL_AUTOMATION_ENABLED" and value is False) or (key == "DRY_RUN_MODE" and value is True)
 
 
+# Caps that allow more when raised / when lowered. Loosening one is as risky as
+# enabling automation: one operator could otherwise lift the daily action cap
+# to 1000 or the budget to $1M alone.
+LOOSER_WHEN_HIGHER = {"MAX_ACTIONS_PER_DAY", "MAX_CW_API_CALLS_PER_HOUR",
+                      "MAX_MONTHLY_BUDGET_USD", "MAX_DAILY_SPEND_USD"}
+LOOSER_WHEN_LOWER = {"ACTION_COOLDOWN_MINUTES"}
+
+
 def _is_unsafe(key: str, value: Any) -> bool:
-    """Changes that let the agent mutate real cloud resources."""
-    return (key == "GLOBAL_AUTOMATION_ENABLED" and value is True) or (key == "DRY_RUN_MODE" and value is False)
+    """Changes that let the agent mutate real cloud resources, or do more of it."""
+    if key == "GLOBAL_AUTOMATION_ENABLED":
+        return value is True
+    if key == "DRY_RUN_MODE":
+        return value is False
+    current = get_flag(key)
+    if current is None:
+        return True
+    if key in LOOSER_WHEN_HIGHER:
+        return value > current
+    if key in LOOSER_WHEN_LOWER:
+        return value < current
+    return False
 
 
 def load_from_env() -> None:

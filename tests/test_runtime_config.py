@@ -81,6 +81,25 @@ def test_safe_change_applies_immediately(fake_db):
     assert res["status"] == "applied" and runtime_config.dry_run_mode() is True
 
 
+@pytest.mark.parametrize("key,looser,tighter", [
+    ("MAX_ACTIONS_PER_DAY", "1000", "1"),
+    ("MAX_DAILY_SPEND_USD", "100000", "0.5"),
+    ("MAX_MONTHLY_BUDGET_USD", "1000000", "1"),
+    ("MAX_CW_API_CALLS_PER_HOUR", "100000", "10"),
+    ("ACTION_COOLDOWN_MINUTES", "0", "600"),
+])
+def test_loosening_a_cap_needs_a_second_operator(fake_db, key, looser, tighter):
+    before = runtime_config.get_flag(key)
+    first = runtime_config.request_change(key, looser, "USER:a")
+    assert first["status"] == "pending_confirmation" and runtime_config.get_flag(key) == before
+    with pytest.raises(PermissionError):
+        runtime_config.request_change(key, looser, "USER:a")
+    second = runtime_config.request_change(key, looser, "USER:b")
+    assert second["status"] == "applied" and second["confirmed_by"] == "USER:b"
+    # Tightening is always the safe direction: one operator, immediate.
+    assert runtime_config.request_change(key, tighter, "USER:a")["status"] == "applied"
+
+
 def test_two_person_rule_can_be_disabled(fake_db, monkeypatch):
     from backend.app.config import settings
     monkeypatch.setattr(settings, "REQUIRE_TWO_PERSON_CONFIG", False)
