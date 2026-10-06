@@ -1,0 +1,14 @@
+# gitleaks config used by CI (.github/workflows/ci.yml, "Secret scan").
+# Default rules, plus an allowlist for test fixtures that are deliberately
+# credential-shaped: the log-scrubbing tests need a fake JWT, AWS's documented
+# example key id and fake passwords to prove they are redacted.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake credentials in test fixtures"
+paths = [
+  '''tests/test_observability\.py''',
+  '''tests/conftest\.py''',
+  '''tests/test_integration\.py''',
+]

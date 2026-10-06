@@ -1,0 +1,8 @@
+target-version = "py311"
+line-length = 120
+extend-exclude = [".venv", "frontend", "node_modules"]
+
+[lint]
+# Real bugs only: syntax errors and undefined names. Style is not enforced;
+# widen this (e.g. F401 unused imports) once the existing code is clean.
+select = ["E9", "F63", "F7", "F82"]

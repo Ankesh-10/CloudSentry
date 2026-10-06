@@ -1,5 +1,8 @@
 -r requirements.txt
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
+pytest-cov>=5.0.0
 moto[ec2,cloudwatch,s3,lambda,rds]>=5.0.0
 pytest-mock>=3.14.0
+ruff>=0.6.0
+pip-audit>=2.7.0
