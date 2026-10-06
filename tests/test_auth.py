@@ -98,6 +98,27 @@ def test_missing_issuer_rejected(client):
     assert client.get("/api/v1/system/config", headers=_h(jwt.encode(claims, SECRET, algorithm="HS256"))).status_code == 401
 
 
+@pytest.mark.parametrize("app_metadata", [
+    "operator", ["operator"], 5, {"cloudsentry_role": ["operator"]}, {"cloudsentry_role": {"x": 1}},
+    {"cloudsentry_role": None}, None,
+])
+def test_malformed_app_metadata_grants_nothing_and_never_500s(client, app_metadata):
+    # Found by fuzzing: non-dict app_metadata / non-string roles crashed with 500.
+    tok = _token("someone", app_metadata=app_metadata)
+    assert client.get("/api/v1/system/config", headers=_h(tok)).status_code == 403
+    res = client.patch("/api/v1/system/config", json={"key": "DRY_RUN_MODE", "value": "true"}, headers=_h(tok))
+    assert res.status_code == 403
+
+
+@pytest.mark.parametrize("flag", ["true", "True", 1, "yes", "false"])
+def test_non_boolean_is_anonymous_fails_closed(client, flag):
+    assert client.get("/api/v1/system/config", headers=_h(_token("user-1", is_anonymous=flag))).status_code == 401
+
+
+def test_explicit_non_anonymous_is_accepted(client):
+    assert client.get("/api/v1/system/config", headers=_h(_token("user-1", is_anonymous=False))).status_code == 200
+
+
 def test_anonymous_session_rejected_even_for_operator_id(client):
     tok = _token("operator-1", is_anonymous=True)
     assert client.get("/api/v1/system/config", headers=_h(tok)).status_code == 401

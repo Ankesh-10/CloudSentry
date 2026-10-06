@@ -150,15 +150,19 @@ def get_current_user(payload: dict = Depends(verify_token)) -> dict:
     if not user_id:
         raise _unauthorized()
     # Supabase anonymous sign-ins carry role=authenticated plus is_anonymous;
-    # they must never count as a known user.
-    if payload.get("is_anonymous") is True:
+    # they must never count as a known user. Anything but absent/false (e.g.
+    # the string "true") is treated as anonymous: fail closed.
+    if payload.get("is_anonymous") not in (None, False):
         raise _unauthorized("Anonymous sessions are not allowed")
-    app_metadata = payload.get("app_metadata") or {}
+    # Claims are attacker-shaped data even when signed: only a string role
+    # inside an object counts; any other shape grants nothing (never a 500).
+    app_metadata = payload.get("app_metadata")
+    role = app_metadata.get("cloudsentry_role") if isinstance(app_metadata, dict) else None
     return {
         "id": user_id,
         "email": payload.get("email"),
         "role": payload.get("role"),
-        "app_role": app_metadata.get("cloudsentry_role"),
+        "app_role": role if isinstance(role, str) else None,
     }
 
 
