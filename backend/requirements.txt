@@ -13,10 +13,11 @@ google-cloud-compute>=1.15.0
 google-cloud-monitoring>=2.14.0
 google-cloud-resource-manager>=1.10.0
 apscheduler>=3.10.0
-scikit-learn>=1.4.0
+# Models are pickled: the loader refuses a model trained with a different
+# scikit-learn version (falls back until the next retrain). Bound the major.
+scikit-learn>=1.4.0,<2
 pandas>=2.2.0
 numpy>=1.26.0
 scipy>=1.13.0
 joblib>=1.4.0
-structlog>=24.1.0
 httpx>=0.27.0

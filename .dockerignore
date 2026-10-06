@@ -19,5 +19,7 @@ frontend
 node_modules
 terraform
 scripts
+# The image runs migrations (render.yaml preDeployCommand).
+!scripts/apply_migrations.py
 .idea
 .vscode

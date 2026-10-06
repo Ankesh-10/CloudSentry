@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from fastapi.concurrency import run_in_threadpool
 
+from backend.app.config import settings
 from backend.app.db.asyncpg_pool import get_pool
 from backend.app.services import job_status, runtime_config
 from ml.inference import InferenceEngine
@@ -81,18 +82,29 @@ async def collect_health(detailed: bool = False) -> dict:
             "dry_run": runtime_config.dry_run_mode(),
         },
         "scheduler": {"running": scheduler.scheduler.running, "leader": scheduler.is_leader()},
-        "jobs": job_status.snapshot(),
+        "jobs": await run_in_threadpool(job_status.snapshot_all),
         "issues": issues,
     }
 
     db_ok = await _probe_db(body, issues, scheduler.is_leader())
 
-    loaded = InferenceEngine().available_models()
+    engine = InferenceEngine()
+    loaded = engine.available_models()
+    info = engine.model_info()
     body["ml_model"] = {
         "status": "ok" if loaded else "cold_start",
         "models": loaded,
         "mode": "isolation_forest" if loaded else "zscore_ewma_fallback",
+        "details": info,
     }
+    for rtype, meta in info.items():
+        trained_at = meta.get("trained_at")
+        try:
+            age_h = (datetime.now(timezone.utc) - datetime.fromisoformat(trained_at)).total_seconds() / 3600
+        except (TypeError, ValueError):
+            continue
+        if age_h > settings.ML_MODEL_STALE_HOURS:
+            issues.append(f"model_stale:{rtype}")
 
     for name, st in body["jobs"].items():
         if st.get("consecutive_failures", 0) >= JOB_FAILURE_ALERT:

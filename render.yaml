@@ -5,28 +5,96 @@ services:
     dockerfilePath: ./backend/Dockerfile
     plan: starter
     region: ohio
+    # Readiness: 503 while the database is unreachable.
     healthCheckPath: /api/v1/health
+    # Applies pending db/migrations before the new version takes traffic; the
+    # API also refuses to start against an out-of-date schema.
+    preDeployCommand: python scripts/apply_migrations.py
+    # Trained ML models must survive deploys (otherwise every deploy is a cold
+    # start until the nightly retrain). A disk pins the service to a single
+    # instance, which the scheduler's leader election assumes anyway.
+    disk:
+      name: cloudsentry-models
+      mountPath: /app/models
+      sizeGB: 1
     envVars:
+      # --- secrets (set in the Render dashboard) ---
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      - key: DATABASE_URL
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: DATABASE_URL          # session pooler (5432) or direct; never 6543
         sync: false
       - key: AWS_ACCESS_KEY_ID
         sync: false
       - key: AWS_SECRET_ACCESS_KEY
         sync: false
-      - key: SUPABASE_JWT_SECRET
+      - key: ALERT_WEBHOOK_URL     # optional Slack-compatible incoming webhook
+        sync: false
+      - key: METRICS_TOKEN         # optional bearer token for /metrics
+        sync: false
+      # --- access control ---
+      - key: OPERATOR_USER_IDS
+        sync: false
+      - key: VIEWER_USER_IDS
         sync: false
       - key: CORS_ORIGINS
         sync: false
+      # --- platform ---
       - key: CLOUD_PROVIDER
         value: "aws"
+      - key: AWS_DEFAULT_REGION
+        value: "us-east-1"
+      - key: ML_MODEL_PATH
+        value: "/app/models"
+      - key: LOG_LEVEL
+        value: "INFO"
+      - key: LOG_FORMAT
+        value: "json"
+      # Render's edge proxy is the only route in, so trust its X-Forwarded-For.
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"
+      # --- safety (conservative defaults; change via the API at runtime) ---
       - key: GLOBAL_AUTOMATION_ENABLED
         value: "false"
       - key: DRY_RUN_MODE
         value: "true"
-      # Render's edge proxy is the only route in, so trust its X-Forwarded-For.
-      - key: FORWARDED_ALLOW_IPS
-        value: "*"
+      - key: MAX_ACTIONS_PER_DAY
+        value: "5"
+      - key: MAX_DAILY_SPEND_USD
+        value: "2.00"
+      - key: MAX_MONTHLY_BUDGET_USD
+        value: "10.00"
+      - key: REQUIRE_TWO_PERSON_CONFIG
+        value: "true"
+
+  # Static dashboard. Add its URL to the backend's CORS_ORIGINS.
+  - type: web
+    name: cloudsentry-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: Referrer-Policy
+        value: no-referrer
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+    envVars:
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_PUBLISHABLE_KEY   # or VITE_SUPABASE_ANON_KEY on legacy keys
+        sync: false
+      - key: VITE_API_BASE_URL       # e.g. https://cloudsentry-backend.onrender.com
+        sync: false

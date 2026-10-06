@@ -14,6 +14,7 @@ COPY backend /app/backend
 COPY ml /app/ml
 COPY data /app/data
 COPY db /app/db
+COPY scripts/apply_migrations.py /app/scripts/apply_migrations.py
 RUN mkdir -p /app/models
 
 RUN useradd --create-home --uid 1000 appuser \
@@ -21,6 +22,10 @@ RUN useradd --create-home --uid 1000 appuser \
 USER appuser
 
 EXPOSE 8000
+
+# Liveness only (no DB): a database outage should not get the container killed.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live', timeout=4).status == 200 else 1)"
 
 # --proxy-headers: take the client IP from X-Forwarded-For, but only from
 # proxies listed in FORWARDED_ALLOW_IPS (uvicorn default: 127.0.0.1). The
