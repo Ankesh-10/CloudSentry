@@ -1,5 +1,13 @@
 # Codebase Audit & Required Changes
 
+> **Status (2026-10-03): historical.** This is the 2026-09-19 audit of an earlier
+> revision. Its findings have since been addressed (auth and roles, API
+> hardening, audit integrity, DB constraints, IAM, action safety, anomaly
+> lifecycle, tagging, deploy/startup checks, CI, tests, ML promotion/metadata,
+> observability, GCP and multi-region). Line references and the
+> docs-vs-implementation matrix below describe the old code; the README is the
+> current reference.
+
 ## Executive Summary
 
 | Field | Value |

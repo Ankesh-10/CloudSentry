@@ -163,11 +163,26 @@ cython_debug/
 
 # CloudSentry specific ignores
 models/*.pkl
+models/*.json
 *.pkl
+.demo_instances
+# Terraform
+terraform/.terraform/
+terraform/.build/
+*.tfstate
+*.tfstate.*
+*.tfplan
 md/
 graphify-out/
 
-# Node
+# Node / frontend
 node_modules/
 dist/
+.env.local
+.env.*.local
+*.tsbuildinfo
 .DS_Store
+
+# scripts/telemetry_demo.py control file
+.telemetry_demo.json
+.telemetry_demo.tmp

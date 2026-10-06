@@ -8,7 +8,10 @@ actions are explicitly denied.
 ## Before you attach it
 
 - **Region.** The policy is written for `us-east-1`. If `AWS_DEFAULT_REGION` is
-  different, replace every `us-east-1` in the file.
+  different, replace every `us-east-1` in the file. With `AWS_REGIONS` (several
+  regions), list them all: `"aws:RequestedRegion": ["us-east-1", "eu-west-1"]`
+  and one ARN per region in each `Remediate*`/`TagInRegion` statement (or
+  `arn:aws:ec2:*:*:instance/*` if every region is acceptable).
 - **Account.** ARNs use `*` for the account id, which only ever matches the
   account the credentials belong to. You may pin it to your account id.
 
