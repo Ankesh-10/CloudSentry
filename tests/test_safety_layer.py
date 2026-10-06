@@ -112,3 +112,17 @@ def test_budget_fails_closed_when_spend_unknown(layer, fake_db):
     fake_db.fail_tables["cost_records"] = True
     over, _ = layer.budget_status()
     assert over is True
+
+
+@pytest.mark.parametrize("tag", [
+    "aws:autoscaling:groupName", "eks:nodegroup-name", "aws:eks:cluster-name", "karpenter.sh/nodepool",
+    "aws:ec2spot:fleet-request-id",
+])
+def test_autoscaled_instances_are_never_stopped(layer, fake_db, tag):
+    """An Auto Scaling group / EKS / fleet terminates and replaces a stopped
+    member, so stop_ec2 on one is a terminate in disguise."""
+    fake_db.rows("resources").append(_res(tags={tag: "web"}))
+    ok, reason = layer.check_proposal("stop_ec2", "r1")
+    assert ok is False and tag in reason
+    # Tagging the same instance stays allowed.
+    assert layer.check_proposal("apply_tags", "r1")[0] is True

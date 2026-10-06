@@ -23,6 +23,19 @@ RDS_ALLOWED_ACTIONS = {"apply_tags", "remove_tags"} | NO_CLOUD_ACTIONS
 # have their own, larger daily cap (MAX_TAG_ACTIONS_PER_DAY) instead.
 METADATA_ONLY_ACTIONS = {"apply_tags", "remove_tags"}
 IN_FLIGHT_STATUSES = ["pending", "pending_approval", "approved", "executing"]
+# Tags AWS (or a cluster autoscaler) puts on instances whose lifecycle it owns.
+# Stopping one is not reversible: the group marks it unhealthy, terminates it
+# and launches a replacement, so a "stop" is in effect a terminate.
+MANAGED_INSTANCE_TAGS = (
+    "aws:autoscaling:groupName",
+    "aws:ec2spot:fleet-request-id",
+    "aws:ec2:fleet-id",
+    "aws:eks:cluster-name",
+    "eks:cluster-name",
+    "eks:nodegroup-name",
+    "karpenter.sh/nodepool",
+    "karpenter.sh/provisioner-name",
+)
 
 
 def _parse_ts(value) -> Optional[datetime]:
@@ -64,6 +77,10 @@ class SafetyLayer:
             return False, "Resource has cloudsentry:exempt=true tag."
         if action_type == "stop_ec2" and _truthy(tags.get("do-not-stop")):
             return False, "Resource has do-not-stop tag."
+        if action_type == "stop_ec2":
+            managed = next((k for k in MANAGED_INSTANCE_TAGS if k in tags), None)
+            if managed:
+                return False, f"Instance is managed by an autoscaler/fleet ({managed}); stopping it would replace it."
         if resource.get("resource_type") == "rds" and action_type not in RDS_ALLOWED_ACTIONS:
             return False, "RDS state changes are never automated."
 
