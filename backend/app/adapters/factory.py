@@ -1,15 +1,21 @@
-from backend.app.config import settings
-from backend.app.adapters.base import CloudAdapter
+from typing import Optional
 
-def get_cloud_adapter() -> CloudAdapter:
+from backend.app.adapters.base import CloudAdapter
+from backend.app.config import settings
+
+
+def get_cloud_adapter(region: Optional[str] = None) -> CloudAdapter:
     """
-    Factory function to return the correct CloudAdapter based on configuration.
+    Return the CloudAdapter for the configured provider.
+
+    `region` selects an AWS region (default: AWS_DEFAULT_REGION). GCP adapters
+    are project-wide (instances carry their zone), so it is ignored there.
     """
     provider = settings.CLOUD_PROVIDER.lower()
-    
+
     if provider == "aws":
         from backend.app.adapters.aws import AWSAdapter
-        return AWSAdapter()
+        return AWSAdapter(region=region)
     elif provider == "gcp":
         from backend.app.adapters.gcp import GCPAdapter
         return GCPAdapter()

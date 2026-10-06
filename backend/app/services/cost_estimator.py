@@ -40,7 +40,15 @@ class CostEstimationService:
     def __init__(self):
         self.db = get_supabase_client()
         self.pricing = load_pricing(settings.AWS_DEFAULT_REGION)
+        self._pricing_by_region = {settings.AWS_DEFAULT_REGION: self.pricing}
         self._unpriced_warned: set[str] = set()
+
+    def _pricing_for(self, region) -> dict:
+        if not region:
+            return self.pricing
+        if region not in self._pricing_by_region:
+            self._pricing_by_region[region] = load_pricing(region)
+        return self._pricing_by_region[region]
 
     def _warn_unpriced(self, key: str) -> None:
         if key not in self._unpriced_warned:
@@ -53,12 +61,13 @@ class CostEstimationService:
         meta = resource.get("metadata") or {}
         state = resource.get("state")
         usage = usage or {}
+        pricing = self._pricing_for(resource.get("region"))
 
         if rtype == "ec2":
             if state not in BILLABLE_EC2_STATES:
                 return 0.0
             inst_type = meta.get("instance_type")
-            price = self.pricing.get("ec2", {}).get(inst_type)
+            price = pricing.get("ec2", {}).get(inst_type)
             if price is None:
                 self._warn_unpriced(f"ec2:{inst_type}")
                 return 0.0
@@ -68,7 +77,7 @@ class CostEstimationService:
             if state not in BILLABLE_RDS_STATES:
                 return 0.0
             cls = meta.get("instance_class")
-            price = self.pricing.get("rds", {}).get(cls)
+            price = pricing.get("rds", {}).get(cls)
             if price is None:
                 self._warn_unpriced(f"rds:{cls}")
                 return 0.0
@@ -77,7 +86,7 @@ class CostEstimationService:
         if rtype == "ebs":
             # Volumes bill for provisioned size whether attached or not.
             vtype = meta.get("volume_type") or "gp3"
-            per_gb = self.pricing.get("ebs", {}).get(f"{vtype}_per_gb_month")
+            per_gb = pricing.get("ebs", {}).get(f"{vtype}_per_gb_month")
             if per_gb is None:
                 self._warn_unpriced(f"ebs:{vtype}")
                 return 0.0
@@ -87,7 +96,7 @@ class CostEstimationService:
             size_bytes = usage.get("BucketSizeBytes")
             if not size_bytes:
                 return 0.0
-            per_gb = float(self.pricing.get("s3", {}).get("standard_per_gb_month", 0.0))
+            per_gb = float(pricing.get("s3", {}).get("standard_per_gb_month", 0.0))
             return per_gb * (float(size_bytes) / BYTES_PER_GB) / HOURS_PER_MONTH
 
         if rtype == "lambda":
@@ -95,7 +104,7 @@ class CostEstimationService:
             avg_ms = float(usage.get("Duration") or 0.0)
             if invocations <= 0:
                 return 0.0
-            lam = self.pricing.get("lambda", {})
+            lam = pricing.get("lambda", {})
             memory_mb = float(meta.get("memory") or 128)
             per_ms = float(lam.get("per_1ms_128mb", 0.0)) * (memory_mb / 128.0)
             compute = invocations * avg_ms * per_ms
@@ -141,7 +150,7 @@ class CostEstimationService:
             return 0
         resources = fetch_all(
             lambda: self.db.table("resources")
-            .select("id, resource_type, metadata, state")
+            .select("id, resource_type, metadata, state, region")
             .not_.in_("state", ["terminated", "deleted"])
             .order("id")
         )

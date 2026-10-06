@@ -25,17 +25,36 @@ class DiscoveryService:
         self.db = get_supabase_client()
 
     def _get_or_create_account(self) -> str:
-        res = self.db.table("cloud_accounts").select("id").limit(1).execute()
+        # Keyed by (provider, account id), not "the first row": with more than
+        # one account configured over time, LIMIT 1 attached resources to
+        # whichever account happened to sort first.
+        provider = settings.CLOUD_PROVIDER.lower()
+        account = settings.CLOUD_ACCOUNT_ID or "unknown"
+        res = (
+            self.db.table("cloud_accounts").select("id")
+            .eq("provider", provider).eq("account_id", account).limit(1).execute()
+        )
         if res.data:
             return res.data[0]["id"]
 
         new_account = {
-            "provider": settings.CLOUD_PROVIDER,
-            "account_id": settings.CLOUD_ACCOUNT_ID or "unknown",
+            "provider": provider,
+            "account_id": account,
             "region": settings.AWS_DEFAULT_REGION,
         }
         res = self.db.table("cloud_accounts").insert(new_account).execute()
         return res.data[0]["id"]
+
+    def _adapters(self) -> list:
+        """One adapter per configured AWS region (default region first)."""
+        if settings.CLOUD_PROVIDER.lower() != "aws":
+            return [self.cloud_adapter]
+        adapters = [self.cloud_adapter]
+        default = getattr(self.cloud_adapter, "region", None)
+        for region in settings.aws_region_list():
+            if region != default:
+                adapters.append(get_cloud_adapter(region))
+        return adapters
 
     def _sync_resources(self, account_id: str, resource_type: str, discovered: List[Dict[str, Any]]) -> Dict[str, int]:
         now = datetime.now(timezone.utc).isoformat()
@@ -118,16 +137,23 @@ class DiscoveryService:
         summary: Dict[str, Any] = {"errors": []}
 
         type_map = [
-            ("ec2", self.cloud_adapter.discover_instances),
-            ("lambda", self.cloud_adapter.discover_functions),
-            ("s3", self.cloud_adapter.discover_buckets),
-            ("rds", self.cloud_adapter.discover_databases),
-            ("ebs", self.cloud_adapter.discover_volumes),
+            ("ec2", "discover_instances"),
+            ("lambda", "discover_functions"),
+            ("s3", "discover_buckets"),
+            ("rds", "discover_databases"),
+            ("ebs", "discover_volumes"),
         ]
+        adapters = self._adapters()
 
-        for resource_type, fetcher in type_map:
+        for resource_type, method in type_map:
+            # S3 bucket listing is global: list once, not once per region.
+            sources = adapters[:1] if resource_type == "s3" else adapters
+            discovered: List[Dict[str, Any]] = []
             try:
-                discovered = fetcher()
+                for adapter in sources:
+                    discovered.extend(getattr(adapter, method)())
+                # Sync only after *every* region listed successfully: a partial
+                # listing would mark the failed region's resources deleted.
                 summary[resource_type] = self._sync_resources(account_id, resource_type, discovered)
             except CloudProviderError as e:
                 logger.error("Discovery failed for %s: %s", resource_type, e)

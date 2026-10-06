@@ -48,7 +48,7 @@ def test_discovered_resource_types_are_allowed():
     from backend.app.services import discovery
     with open(discovery.__file__, encoding="utf-8") as f:
         src = f.read()
-    discovered = set(re.findall(r'\("(\w+)", self\.cloud_adapter\.discover_', src))
+    discovered = set(re.findall(r'\("(\w+)", "discover_\w+"\)', src))
     assert discovered and discovered <= _vocab(SQL_009, "resources_resource_type_check")
 
 

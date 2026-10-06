@@ -112,11 +112,12 @@ class TelemetryService:
     def __init__(self):
         self.cloud_adapter = get_cloud_adapter()
         self.db = get_supabase_client()
+        self._regional: dict = {}
 
     def _load_resources(self) -> List[Dict[str, Any]]:
         return fetch_all(
             lambda: self.db.table("resources")
-            .select("id, provider_id, resource_type")
+            .select("id, provider_id, resource_type, region")
             .not_.in_("state", INACTIVE_STATES)
             .order("id")
         )
@@ -130,25 +131,41 @@ class TelemetryService:
 
         end_time = datetime.datetime.now(datetime.timezone.utc)
         records: List[tuple] = []
-        for (period, lookback), (queries, mapping) in build_queries(resources).items():
-            chunks = max(1, (len(queries) + 499) // 500)
-            if not _note_cw_calls(chunks):
-                logger.warning("Skipping %s CloudWatch queries (period=%ss): hourly cap reached", len(queries), period)
-                continue
-            try:
-                results = self.cloud_adapter.get_metric_data(queries, end_time - lookback, end_time)
-            except CloudProviderError:
-                # Provider failure is not "zero usage": record nothing for this group.
-                logger.error("CloudWatch call failed for period=%ss group", period)
-                continue
-            for result in results:
-                qid = result.get("Id")
-                if qid not in mapping:
+        # CloudWatch is regional: query each region's resources through that
+        # region's client (S3 bucket metrics live in the bucket's region).
+        by_region: Dict[Any, List[Dict[str, Any]]] = {}
+        for r in resources:
+            by_region.setdefault(r.get("region"), []).append(r)
+        for region, region_resources in by_region.items():
+            adapter = self._adapter_for(region)
+            for (period, lookback), (queries, mapping) in build_queries(region_resources).items():
+                chunks = max(1, (len(queries) + 499) // 500)
+                if not _note_cw_calls(chunks):
+                    logger.warning("Skipping %s CloudWatch queries (period=%ss): hourly cap reached",
+                                   len(queries), period)
                     continue
-                resource_id, metric_name, unit = mapping[qid]
-                for t, v in zip(result.get("Timestamps") or [], result.get("Values") or []):
-                    records.append((t, resource_id, metric_name, float(v), unit))
+                try:
+                    results = adapter.get_metric_data(queries, end_time - lookback, end_time)
+                except CloudProviderError:
+                    # Provider failure is not "zero usage": record nothing for this group.
+                    logger.error("CloudWatch call failed for region=%s period=%ss group", region, period)
+                    continue
+                for result in results:
+                    qid = result.get("Id")
+                    if qid not in mapping:
+                        continue
+                    resource_id, metric_name, unit = mapping[qid]
+                    for t, v in zip(result.get("Timestamps") or [], result.get("Values") or []):
+                        records.append((t, resource_id, metric_name, float(v), unit))
         return records
+
+    def _adapter_for(self, region):
+        default = getattr(self.cloud_adapter, "region", None)
+        if not region or default is None or region == default:
+            return self.cloud_adapter
+        if region not in self._regional:
+            self._regional[region] = get_cloud_adapter(region)
+        return self._regional[region]
 
     async def run(self):
         logger.info("Starting Telemetry Collection cycle...")

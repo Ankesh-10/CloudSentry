@@ -19,12 +19,12 @@ def _tags_to_dict(tag_list) -> Dict[str, str]:
 
 
 class AWSAdapter(CloudAdapter):
-    def __init__(self):
+    def __init__(self, region: Optional[str] = None):
+        self.region = region or settings.AWS_DEFAULT_REGION
         boto_config = Config(
-            region_name=settings.AWS_DEFAULT_REGION,
+            region_name=self.region,
             retries={"max_attempts": 3, "mode": "adaptive"},
         )
-        self.region = settings.AWS_DEFAULT_REGION
         try:
             self.ec2 = boto3.client("ec2", config=boto_config)
             self.lambda_client = boto3.client("lambda", config=boto_config)
