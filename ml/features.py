@@ -18,6 +18,9 @@ def _pivot_metrics(df: pd.DataFrame) -> pd.DataFrame:
 # clean data flagged ~25-30% of the next day and the promotion gate rejected it.
 # cpu_deviation_ratio carries the same signal relative to that average.
 NON_MODEL_FEATURES = ("rolling_avg_cpu_24h",)
+# Types with model features. Anything else (RDS, S3, EBS) would be fitted on
+# time_of_day and constant zeros: a model of the clock, not of the resource.
+MODEL_RESOURCE_TYPES = ("ec2", "lambda")
 
 
 def model_features(features: pd.DataFrame) -> pd.DataFrame:

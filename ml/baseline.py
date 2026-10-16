@@ -79,6 +79,21 @@ def _window_label(hours: float) -> str:
     return f"{hours:g}h" if hours >= 1 else f"{hours * 60:g} min"
 
 
+def _window(df: pd.DataFrame, metric_name: str, window_hours: float):
+    """(samples of the last `window_hours` by time, window start), or None when
+    they do not cover the window: too few, or starting too late."""
+    data = df[df["metric_name"] == metric_name].sort_values("time")
+    if data.empty:
+        return None
+    times = pd.to_datetime(data["time"], utc=True)
+    start = times.iloc[-1] - pd.Timedelta(hours=window_hours)
+    inside = (times > start).values
+    span = times.iloc[-1] - times[inside].iloc[0]
+    if inside.sum() < IDLE_MIN_SAMPLES or span < pd.Timedelta(hours=window_hours * IDLE_MIN_COVERAGE):
+        return None
+    return data[inside], start
+
+
 def check_idle_compute(df: pd.DataFrame, resource_type: str, cpu_threshold: float = 5.0, window_hours: float = 2.0) -> dict:
     """Idle = every CPU sample of the last `window_hours` (by time, whatever the
     sampling period) under `cpu_threshold`, and negligible network. `evaluable`
@@ -87,15 +102,10 @@ def check_idle_compute(df: pd.DataFrame, resource_type: str, cpu_threshold: floa
     if resource_type != "ec2":
         return {"is_anomaly": False, "evaluable": False}
 
-    cpu_data = df[df["metric_name"] == "CPUUtilization"].sort_values("time")
-    if cpu_data.empty:
+    found = _window(df, "CPUUtilization", window_hours)
+    if found is None:
         return {"is_anomaly": False, "evaluable": False}
-    times = pd.to_datetime(cpu_data["time"], utc=True)
-    start = times.iloc[-1] - pd.Timedelta(hours=window_hours)
-    in_window = cpu_data[(times > start).values]
-    span = times.iloc[-1] - times[(times > start).values].iloc[0]
-    if len(in_window) < IDLE_MIN_SAMPLES or span < pd.Timedelta(hours=window_hours * IDLE_MIN_COVERAGE):
-        return {"is_anomaly": False, "evaluable": False}
+    in_window, start = found
 
     net_data = df[df["metric_name"] == "NetworkIn"]
     net_window = net_data[(pd.to_datetime(net_data["time"], utc=True) > start).values]
@@ -119,6 +129,55 @@ def check_idle_compute(df: pd.DataFrame, resource_type: str, cpu_threshold: floa
                 "rolling_avg_cpu_24h": avg_cpu,
                 "idle_score": idle_score,
             },
+        }
+    return {"is_anomaly": False}
+
+
+def check_idle_database(df: pd.DataFrame, window_hours: float, max_connections: float = 1.0) -> dict:
+    """Idle RDS = average connections under `max_connections` in every sample
+    of the last `window_hours`. Same coverage rule as check_idle_compute."""
+    found = _window(df, "DatabaseConnections", window_hours)
+    if found is None:
+        return {"is_anomaly": False, "evaluable": False}
+    peak = float(found[0]["value"].max())
+    if peak < max_connections:
+        return {
+            "is_anomaly": True,
+            "score": 1.0,
+            "confidence": 0.85,
+            "reason": f"RDS had no connections for {_window_label(window_hours)} (peak {peak:.2f})",
+            "anomaly_type": "idle_database",
+            "severity": "MEDIUM",
+            "model_version": "rule_idle_database",
+        }
+    return {"is_anomaly": False}
+
+
+GIB = 1024 ** 3
+
+
+def check_low_storage(df: pd.DataFrame, allocated_gib, min_free_pct: float = 10.0) -> dict:
+    """Free storage under `min_free_pct` of the allocated size (RDS reports
+    AllocatedStorage in GiB). Not evaluable without the size or a sample."""
+    free = df[df["metric_name"] == "FreeStorageSpace"].sort_values("time")
+    try:
+        total = float(allocated_gib) * GIB
+    except (TypeError, ValueError):
+        total = 0.0
+    if free.empty or total <= 0:
+        return {"is_anomaly": False, "evaluable": False}
+    latest = float(free["value"].iloc[-1])
+    free_pct = latest / total * 100
+    if free_pct < min_free_pct:
+        return {
+            "is_anomaly": True,
+            "score": 1.0 - free_pct / 100,
+            "confidence": 0.9,
+            "reason": (f"RDS free storage {latest / GIB:.1f} GiB is {free_pct:.1f}% of {float(allocated_gib):g} GiB "
+                       f"(< {min_free_pct:g}%)"),
+            "anomaly_type": "low_storage",
+            "severity": "HIGH" if free_pct < min_free_pct / 2 else "MEDIUM",
+            "model_version": "rule_low_storage",
         }
     return {"is_anomaly": False}
 

@@ -95,7 +95,11 @@ RESOURCES = {
     "webhook": DemoResource("lambda", "demo-invoice-webhook", "demo-invoice-webhook", metadata={"memory": 128}),
     "notifier": DemoResource("lambda", "demo-notifier", "demo-notifier", metadata={"memory": 128}),
     "db": DemoResource("rds", "demo-orders-db", "demo-orders-db", protected=True,
-                       metadata={"instance_class": "db.t3.micro"}),
+                       metadata={"instance_class": "db.t3.micro", "allocated_storage_gb": 20}),
+    "reporting-db": DemoResource("rds", "demo-reporting-db", "demo-reporting-db",
+                                 metadata={"instance_class": "db.t3.micro", "allocated_storage_gb": 20}),
+    "analytics-db": DemoResource("rds", "demo-analytics-db", "demo-analytics-db",
+                                 metadata={"instance_class": "db.t3.micro", "allocated_storage_gb": 20}),
     "scratch": DemoResource("ebs", "vol-0demo00scratch", "demo-scratch-volume",
                             metadata={"volume_type": "gp3", "size": 100}),
 }
@@ -130,6 +134,9 @@ PROFILES = {
     "rds": {
         "normal": {"DatabaseConnections": (8, 20), "FreeStorageSpace": (14.0e9, 14.2e9)},
         "busy": {"DatabaseConnections": (300, 400), "FreeStorageSpace": (12.0e9, 12.2e9)},
+        "idle": {"DatabaseConnections": (0, 0), "FreeStorageSpace": (14.0e9, 14.2e9)},
+        # ~5-6% of the 20 GiB allocated: under RDS_LOW_STORAGE_PCT (10).
+        "storage-low": {"DatabaseConnections": (8, 20), "FreeStorageSpace": (1.0e9, 1.4e9)},
     },
 }
 
@@ -181,8 +188,14 @@ SCENARIOS = {
         "notifier", mode="surge", wait="1-2 min",
         shows="~4x invocations: statistical_anomaly (under the 10x runaway rule). Alert only."),
     "rds-busy": Scenario(
-        "db", mode="busy", wait="chart: seconds",
-        shows="connections x20 on a protected RDS. There is no RDS detector: chart only."),
+        "db", mode="busy", wait="1-2 min",
+        shows="connections x20: statistical_anomaly. The RDS is protected: alert only."),
+    "rds-idle": Scenario(
+        "reporting-db", mode="idle", wait="~7 min",
+        shows="no connections for the idle window: idle_database -> recommend_review (needs approval)."),
+    "rds-storage": Scenario(
+        "analytics-db", mode="storage-low", wait="next cycle",
+        shows="free storage ~6% of 20 GiB: low_storage -> recommend_review (needs approval)."),
     "ml-anomaly": Scenario(
         "ml", mode="quiet-flood", wait="1-2 min",
         shows="CPU ~3% while network floods: ml_behavioral_anomaly once `train-ml` ran (best with "
@@ -199,7 +212,7 @@ SCENARIOS = {
 # has to last the whole 6-minute window, so it is the slowest to show.
 STORY = [
     (0, [("off", "all")],
-     "Baseline: 12 healthy demo resources. Open the Dashboard and a resource page."),
+     "Baseline: 14 healthy demo resources. Open the Dashboard and a resource page."),
     (1, [("on", "idle-ec2"), ("on", "idle-protected"), ("on", "idle-autoscaled"), ("on", "idle-do-not-stop")],
      "Four instances go idle. In ~7 min all four get idle_compute, but only demo-batch-worker gets a "
      "stop: protection, the Auto Scaling tag and do-not-stop hold back the other three."),
@@ -215,9 +228,10 @@ STORY = [
     (10, [("off", "cpu-spike"), ("off", "lambda-runaway"), ("on", "lambda-errors"), ("on", "lambda-surge")],
      "Spike and runaway end (resolved after 30 quiet min). demo-invoice-webhook starts failing (anomaly, "
      "too little confidence for an action); demo-notifier surges ~4x (statistical_anomaly)."),
-    (13, [("on", "rds-busy"), ("on", "ml-anomaly")],
-     "demo-orders-db gets busy (protected; chart only). demo-ml-api goes quiet while its network floods: "
-     "ml_behavioral_anomaly if you ran `train-ml`."),
+    (13, [("on", "rds-busy"), ("on", "rds-idle"), ("on", "rds-storage"), ("on", "ml-anomaly")],
+     "Databases: demo-orders-db gets busy (protected: alert only), demo-reporting-db goes unused and "
+     "demo-analytics-db runs out of space (both get a review to approve). demo-ml-api goes quiet while its "
+     "network floods: ml_behavioral_anomaly if you ran `train-ml`."),
     (16, [],
      "Actions page: the idle stop and Lambda limit ran as dry runs ('Synthetic demo resource: WOULD ...'), "
      "or show as blocked if the kill-switch is on. Approve the volume review; then check the Audit log."),

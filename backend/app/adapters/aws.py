@@ -140,6 +140,7 @@ class AWSAdapter(CloudAdapter):
                         "metadata": {
                             "instance_class": db.get("DBInstanceClass"),
                             "engine": db.get("Engine"),
+                            "allocated_storage_gb": db.get("AllocatedStorage"),
                             "multi_az": db.get("MultiAZ"),
                             "arn": db.get("DBInstanceArn"),
                         },

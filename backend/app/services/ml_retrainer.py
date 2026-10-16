@@ -8,7 +8,7 @@ from backend.app.config import settings
 from backend.app.db.asyncpg_pool import get_pool
 from backend.app.db.pagination import fetch_all
 from backend.app.db.supabase_client import get_supabase_client
-from ml.features import build_training_dataset
+from ml.features import MODEL_RESOURCE_TYPES, build_training_dataset
 from ml.trainer import MIN_TRAINING_ROWS, ModelTrainer
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,7 @@ class MLRetrainingService:
             lambda: self.db.table("resources")
             .select("id, resource_type")
             .not_.in_("state", ["terminated", "deleted"])
+            .in_("resource_type", list(MODEL_RESOURCE_TYPES))
             .order("id"),
         )
         if not resources:

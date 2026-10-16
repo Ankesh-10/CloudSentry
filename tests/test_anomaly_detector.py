@@ -205,3 +205,49 @@ def test_going_idle_resolves_statistical_anomalies(detector, fake_db):
     detector.process_resource(_resource(tags=tags), _idle_records(), NOW)
     assert _types(fake_db) == ["idle_compute"]
     assert _types(fake_db, "resolved") == ["unusual_cpu_spike"]
+
+
+def _rds(metadata=None, state="available"):
+    return {"id": "db1", "resource_type": "rds", "state": state, "tags": {"Project": "p", "Owner": "o"},
+            "metadata": {"allocated_storage_gb": 20} if metadata is None else metadata}
+
+
+def _rds_records(connections, free_gib=14.0, step=timedelta(minutes=5)):
+    out = []
+    for i, c in enumerate(connections):
+        t = NOW - step * (len(connections) - 1 - i)
+        out += [{"time": t, "metric_name": "DatabaseConnections", "value": c},
+                {"time": t, "metric_name": "FreeStorageSpace", "value": free_gib * 1024 ** 3}]
+    return out
+
+
+def test_rds_connection_surge_is_a_statistical_anomaly(detector, fake_db):
+    detector.process_resource(_rds(), _rds_records([10.0, 12.0] * 20 + [300.0]), NOW)
+    assert _types(fake_db) == ["statistical_anomaly"]
+
+
+def test_idle_rds_is_flagged_and_its_fall_is_not_a_statistical_anomaly(detector, fake_db, monkeypatch):
+    monkeypatch.setattr(settings, "ML_IDLE_WINDOW_HOURS", 1.0)
+    detector.process_resource(_rds(), _rds_records([10.0, 12.0] * 20 + [0.0]), NOW)
+    assert _types(fake_db) == []  # just fell: not idle yet, and not a "statistical" event either
+    detector.process_resource(_rds(), _rds_records([10.0, 12.0] * 20 + [0.0] * 13), NOW)
+    assert _types(fake_db) == ["idle_database"]
+    detector.process_resource(_rds(state="stopped"), [], NOW)
+    assert _types(fake_db) == [] and _types(fake_db, "resolved") == ["idle_database"]
+
+
+def test_rds_low_storage_needs_the_allocated_size(detector, fake_db):
+    detector.process_resource(_rds(metadata={}), _rds_records([10.0, 12.0] * 20, free_gib=1.0), NOW)
+    assert _types(fake_db) == []
+    detector.process_resource(_rds(), _rds_records([10.0, 12.0] * 20, free_gib=1.0), NOW)
+    assert _types(fake_db) == ["low_storage"]
+    detector.process_resource(_rds(), _rds_records([10.0, 12.0] * 20, free_gib=12.0), NOW)
+    assert _types(fake_db) == [] and _types(fake_db, "resolved") == ["low_storage"]
+
+
+def test_rds_never_uses_an_isolation_forest(detector, fake_db, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("no model exists for RDS")
+    monkeypatch.setattr(settings, "ML_MIN_POINTS_IF", 10)
+    monkeypatch.setattr(detector.inference_engine, "predict", boom)
+    detector.process_resource(_rds(), _rds_records([10.0, 12.0] * 20), NOW)

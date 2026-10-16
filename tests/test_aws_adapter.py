@@ -42,3 +42,11 @@ def test_stop_instance(aws_adapter):
     assert success is True
     updated = aws_adapter.discover_instances()
     assert updated[0]["state"] == "stopped"
+
+
+def test_discover_databases_records_allocated_storage(aws_adapter):
+    boto3.client("rds", region_name="us-east-1").create_db_instance(
+        DBInstanceIdentifier="orders", DBInstanceClass="db.t3.micro", Engine="postgres",
+        AllocatedStorage=50, MasterUsername="admin", MasterUserPassword="not-a-real-password-1")
+    db = aws_adapter.discover_databases()[0]
+    assert db["metadata"]["allocated_storage_gb"] == 50  # low_storage needs it

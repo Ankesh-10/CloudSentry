@@ -9,8 +9,15 @@ from backend.app.config import settings
 from backend.app.db.asyncpg_pool import get_pool
 from backend.app.db.pagination import fetch_all
 from backend.app.db.supabase_client import get_supabase_client
-from ml.baseline import check_idle_compute, check_runaway_lambda, detect_anomaly_ewma, detect_anomaly_zscore
-from ml.features import build_feature_vector
+from ml.baseline import (
+    check_idle_compute,
+    check_idle_database,
+    check_low_storage,
+    check_runaway_lambda,
+    detect_anomaly_ewma,
+    detect_anomaly_zscore,
+)
+from ml.features import MODEL_RESOURCE_TYPES, build_feature_vector
 from ml.inference import InferenceEngine
 
 logger = logging.getLogger(__name__)
@@ -19,7 +26,7 @@ INACTIVE_STATES = ["terminated", "deleted"]
 # Metric-based rules only run on data at least this fresh; otherwise the last
 # samples before a stop would keep re-raising "idle" for a stopped instance.
 MAX_SAMPLE_AGE = timedelta(minutes=30)
-PRIMARY_METRIC = {"ec2": "CPUUtilization", "lambda": "Invocations"}
+PRIMARY_METRIC = {"ec2": "CPUUtilization", "lambda": "Invocations", "rds": "DatabaseConnections"}
 # Metric-behaviour anomalies (as opposed to state/metadata rules). They clear
 # when the behaviour stops; see _resolve_quiet.
 STATISTICAL_TYPES = ["ml_behavioral_anomaly", "statistical_anomaly", "unusual_cpu_spike"]
@@ -108,6 +115,9 @@ class AnomalyDetectorService:
             self._resolve_cleared(resource_id, "idle_compute", detected_at)
             self._resolve_types(resource_id, BEHAVIORAL_TYPES, detected_at)
             return
+        if resource_type == "rds" and resource.get("state") == "stopped":
+            self._resolve_types(resource_id, ["idle_database"] + STATISTICAL_TYPES, detected_at)
+            return
         if not records:
             return
 
@@ -133,6 +143,16 @@ class AnomalyDetectorService:
                 self._resolve_types(resource_id, STATISTICAL_TYPES, detected_at)
                 return
 
+        if resource_type == "rds":
+            storage = check_low_storage(df, (resource.get("metadata") or {}).get("allocated_storage_gb"),
+                                        settings.RDS_LOW_STORAGE_PCT)
+            self._apply_rule(resource_id, "low_storage", storage, detected_at, evaluable=storage.get("evaluable", True))
+            idle_db = check_idle_database(df, settings.ML_IDLE_WINDOW_HOURS, settings.RDS_IDLE_MAX_CONNECTIONS)
+            self._apply_rule(resource_id, "idle_database", idle_db, detected_at, evaluable=idle_db.get("evaluable", True))
+            if idle_db["is_anomaly"]:
+                self._resolve_types(resource_id, STATISTICAL_TYPES, detected_at)
+                return
+
         runaway = check_runaway_lambda(df, resource_type)
         if runaway["is_anomaly"]:
             self._record_anomaly(resource_id, runaway, detected_at, runaway.get("features") or {})
@@ -155,7 +175,7 @@ class AnomalyDetectorService:
         features_df = build_feature_vector(df, resource_type)
         features = features_df.iloc[-1].to_dict() if not features_df.empty else {}
 
-        if point_count >= settings.ML_MIN_POINTS_IF:
+        if point_count >= settings.ML_MIN_POINTS_IF and resource_type in MODEL_RESOURCE_TYPES:
             result = self.inference_engine.predict(features_df, resource_type)
             if result.get("reason") != "Model not trained":
                 if result.get("is_anomaly"):
@@ -170,11 +190,12 @@ class AnomalyDetectorService:
         else:
             result = detect_anomaly_ewma(df, metric, threshold=settings.ML_ZSCORE_THRESHOLD)
             result["model_version"] = "ewma_fallback"
-        if (result.get("is_anomaly") and resource_type == "ec2" and result.get("direction") == "down"
-                and _latest(df, metric) < settings.ML_IDLE_CPU_THRESHOLD_PCT):
-            # CPU falling to near zero is the idle rule's call, made once the
-            # quiet has lasted ML_IDLE_WINDOW_HOURS; flagging the fall itself
-            # would just be a noisy first chapter of the same story.
+        idle_floor = {"ec2": settings.ML_IDLE_CPU_THRESHOLD_PCT, "rds": settings.RDS_IDLE_MAX_CONNECTIONS}
+        if (result.get("is_anomaly") and resource_type in idle_floor and result.get("direction") == "down"
+                and _latest(df, metric) < idle_floor[resource_type]):
+            # Falling to near zero is the idle rule's call, made once the quiet
+            # has lasted ML_IDLE_WINDOW_HOURS; flagging the fall itself would
+            # just be a noisy first chapter of the same story.
             result = {**result, "is_anomaly": False, "reason": ""}
         result["_features"] = features
         return result

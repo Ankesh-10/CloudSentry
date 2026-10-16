@@ -118,3 +118,22 @@ def test_runaway_lambda_stays_runaway_while_it_lasts():
     df = _cpu([100.0] * 30 + [5000.0] * 12, metric="Invocations")
     result = check_runaway_lambda(df, "lambda")
     assert result["is_anomaly"] is True and result["anomaly_type"] == "runaway_lambda"
+
+
+def test_idle_database_needs_no_connections_for_the_whole_window():
+    from ml.baseline import check_idle_database
+    quiet = _cpu([0.0] * 13, step=timedelta(seconds=30), metric="DatabaseConnections")
+    busy = _cpu([0.0] * 12 + [3.0], step=timedelta(seconds=30), metric="DatabaseConnections")
+    assert check_idle_database(quiet, window_hours=0.1)["anomaly_type"] == "idle_database"
+    assert check_idle_database(busy, window_hours=0.1) == {"is_anomaly": False}
+    assert check_idle_database(quiet.tail(4), window_hours=0.1)["evaluable"] is False
+
+
+def test_low_storage_is_a_share_of_the_allocated_size():
+    from ml.baseline import GIB, check_low_storage
+    df = _cpu([14 * GIB, 1.5 * GIB], metric="FreeStorageSpace")
+    result = check_low_storage(df, 20, min_free_pct=10)  # 1.5 of 20 GiB = 7.5 %
+    assert (result["anomaly_type"], result["severity"]) == ("low_storage", "MEDIUM")
+    assert check_low_storage(_cpu([0.5 * GIB], metric="FreeStorageSpace"), 20)["severity"] == "HIGH"
+    assert check_low_storage(_cpu([14 * GIB], metric="FreeStorageSpace"), 20) == {"is_anomaly": False}
+    assert check_low_storage(df, None)["evaluable"] is False  # size unknown until rediscovery

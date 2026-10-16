@@ -62,6 +62,7 @@ Sign in with a Supabase user whose id is in `VIEWER_USER_IDS` / `OPERATOR_USER_I
 | 010 | Unused-EBS policy becomes `recommend_review` |
 | 011 | `schema_migrations`, persisted job status (`job_runs`) |
 | 012 | Resource identity is `(resource_type, region, provider_id)`: same-named Lambda/RDS in two regions are two resources |
+| 013 | RDS review policies: idle databases and low free storage get a `recommend_review` (never a state change) |
 
 ## Access control
 
@@ -126,6 +127,7 @@ All settings are environment variables (see `.env.example` for the full, comment
 | `RATE_LIMIT_PER_MINUTE` | `300` | Per-client-IP limit, per process |
 | `MAX_CW_METRICS_PER_HOUR` | `2000` | CloudWatch cost cap: GetMetricData bills per metric (~$15/month at 2000) |
 | `ML_IDLE_WINDOW_HOURS` / `ML_IDLE_CPU_THRESHOLD_PCT` | `24` / `5` | EC2 is idle only if CPU stays below the threshold for the whole window, measured in time whatever the sampling period (`0.1` = 6 min for a quick demo) |
+| `RDS_IDLE_MAX_CONNECTIONS` / `RDS_LOW_STORAGE_PCT` | `1` / `10` | RDS is idle when average connections stay below this for the idle window; `low_storage` when free space is under this % of the allocated size. Both only recommend a review |
 | `ALERT_WEBHOOK_URL` | — | Slack-compatible webhook: actions awaiting approval, failed actions, verification timeouts, rollbacks, emergency stop, failing jobs |
 | `METRICS_TOKEN` | — | Enables `/metrics` |
 | `AUDIT_RETENTION_DAYS` / `HISTORY_RETENTION_DAYS` | `365` | Retention (minimum 90) |
@@ -168,7 +170,7 @@ All settings are environment variables (see `.env.example` for the full, comment
 Use a sandbox AWS account.
 
 * **Terraform** (`terraform/`): an idle instance, a protected instance, an orphaned volume, a bucket and a Lambda; optionally the CloudSentry IAM role (`-var create_cloudsentry_role=true`).
-* **Live telemetry without AWS:** `scripts/telemetry_demo.py` (writes need `CLOUDSENTRY_ALLOW_SYNTHETIC_METRICS=1`) seeds 12 demo resources (7 EC2, 3 Lambda, an RDS and an EBS volume), backfills history and streams live samples. Every situation CloudSentry handles is a switchable *scenario*: `cpu-spike`, `idle-ec2`, `idle-protected`, `idle-autoscaled`, `idle-do-not-stop`, `stopped`, `untagged`, `unused-volume`, `lambda-runaway`, `lambda-errors`, `lambda-surge`, `rds-busy`, `ml-anomaly` and `outage`. Each drives its own resource, so any combination can run at once: `start` streams, `list` shows what each scenario does and how long it takes, `on|off|toggle <scenario ...|all>` switches them (also typed into the running `start` terminal), `start --story` plays a hands-free ~20 min narrated tour, `train-ml` trains the EC2 model from demo-ml-api's 8 days of history (local backend only) and `cleanup` removes it all. Every action on a demo resource is forced to dry-run (`metadata.synthetic=true`), whatever `DRY_RUN_MODE` says; executing approved actions still needs `GLOBAL_AUTOMATION_ENABLED=true`. Run the backend with `JOB_PIPELINE_MINUTES=1`, `ML_IDLE_WINDOW_HOURS=0.1` and, for `ml-anomaly`, `ML_IF_DECISION_THRESHOLD=-0.05`. `tests/test_telemetry_demo.py` runs every scenario through the real detector and policy engine.
+* **Live telemetry without AWS:** `scripts/telemetry_demo.py` (writes need `CLOUDSENTRY_ALLOW_SYNTHETIC_METRICS=1`) seeds 14 demo resources (7 EC2, 3 Lambda, 3 RDS and an EBS volume), backfills history and streams live samples. Every situation CloudSentry handles is a switchable *scenario*: `cpu-spike`, `idle-ec2`, `idle-protected`, `idle-autoscaled`, `idle-do-not-stop`, `stopped`, `untagged`, `unused-volume`, `lambda-runaway`, `lambda-errors`, `lambda-surge`, `rds-busy`, `rds-idle`, `rds-storage`, `ml-anomaly` and `outage`. Each drives its own resource, so any combination can run at once: `start` streams, `list` shows what each scenario does and how long it takes, `on|off|toggle <scenario ...|all>` switches them (also typed into the running `start` terminal), `start --story` plays a hands-free ~20 min narrated tour, `train-ml` trains the EC2 model from demo-ml-api's 8 days of history (local backend only) and `cleanup` removes it all. Every action on a demo resource is forced to dry-run (`metadata.synthetic=true`), whatever `DRY_RUN_MODE` says; executing approved actions still needs `GLOBAL_AUTOMATION_ENABLED=true`. Run the backend with `JOB_PIPELINE_MINUTES=1`, `ML_IDLE_WINDOW_HOURS=0.1` and, for `ml-anomaly`, `ML_IF_DECISION_THRESHOLD=-0.05`. `tests/test_telemetry_demo.py` runs every scenario through the real detector and policy engine.
 * **Scripts:** `scripts/provision_demo.sh` (needs `DEMO_LAMBDA_ROLE_ARN` on real AWS, e.g. `terraform output demo_lambda_role_arn`), `scripts/shutdown_demo.sh [--terminate]`, `scripts/run_stress.sh` (mock endpoints only), `scripts/inject_anomaly.py` (requires `CLOUDSENTRY_ALLOW_SYNTHETIC_METRICS=1`; `--cleanup <resource_id>` removes the samples).
 
 ## Tests

@@ -33,7 +33,7 @@ def test_action_types_written_by_code_are_allowed():
 
 
 def test_seeded_policies_satisfy_policy_constraints():
-    seeds = _sql("004_seed_policies.sql") + _sql("006_security_and_seed.sql")
+    seeds = _sql("004_seed_policies.sql") + _sql("006_security_and_seed.sql") + _sql("013_rds_review_policies.sql")
     # Seed rows end with: ..., '<action_type>', '<risk_level>', <requires_approval>, <priority>
     pairs = re.findall(r"'(\w+)',\s*'(LOW|MEDIUM|HIGH)',\s*(?:true|false)", seeds)
     assert len(pairs) >= 4
@@ -77,3 +77,12 @@ def test_discovery_upserts_on_the_region_scoped_resource_key():
 def test_migrations_are_numbered_contiguously():
     nums = sorted(int(f[:3]) for f in os.listdir(MIGRATIONS) if re.match(r"^\d{3}_.*\.sql$", f))
     assert nums == list(range(1, len(nums) + 1))
+
+
+def test_migration_013_only_recommends_for_rds():
+    from backend.app.services.safety_layer import RDS_ALLOWED_ACTIONS
+    sql = _sql("013_rds_review_policies.sql")
+    for anomaly in ("idle_database", "low_storage"):
+        assert f"'{anomaly}'" in sql
+    assert sql.count("'recommend_review'") == 2 and "recommend_review" in RDS_ALLOWED_ACTIONS
+    assert "INSERT INTO schema_migrations (version) VALUES (13)" in sql

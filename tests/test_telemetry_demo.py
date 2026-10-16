@@ -19,7 +19,7 @@ NOW = datetime.now(timezone.utc).replace(microsecond=0)
 SLOT = 30  # --bucket-seconds default
 WRITES_PER_SLOT = 3  # --interval 10 into 30 s slots: the last write of a slot is what is stored
 
-# Mirrors the seeded policies (migrations 004, 006 and 010); test_policies_match_migrations
+# Mirrors the seeded policies (migrations 004, 006, 010 and 013); test_policies_match_migrations
 # keeps the conditions honest.
 POLICIES = [
     {"name": "Auto-stop idle EC2 instances", "resource_type": "ec2", "anomaly_type": "idle_compute",
@@ -39,6 +39,12 @@ POLICIES = [
     {"name": "Apply tags to untagged resources", "resource_type": "*", "anomaly_type": "untagged_resource",
      "conditions": {"AND": [{"field": "resource.protected", "op": "eq", "value": False}]},
      "action_type": "apply_tags", "risk_level": "LOW", "requires_approval": False, "priority": 200},
+    {"name": "Review idle RDS databases", "resource_type": "rds", "anomaly_type": "idle_database",
+     "conditions": {"AND": [{"field": "resource.state", "op": "eq", "value": "available"}]},
+     "action_type": "recommend_review", "risk_level": "LOW", "requires_approval": True, "priority": 100},
+    {"name": "Review RDS databases running out of storage", "resource_type": "rds", "anomaly_type": "low_storage",
+     "conditions": {"AND": [{"field": "resource.state", "op": "eq", "value": "available"}]},
+     "action_type": "recommend_review", "risk_level": "LOW", "requires_approval": True, "priority": 100},
 ]
 
 # scenario -> (anomalies it must raise, anomalies it may also raise, action it must lead to or None).
@@ -56,7 +62,9 @@ EXPECTED = {
     "lambda-runaway": ({"runaway_lambda"}, set(), "limit_lambda"),
     "lambda-errors": ({"runaway_lambda"}, set(), None),
     "lambda-surge": ({"statistical_anomaly"}, set(), None),
-    "rds-busy": (set(), set(), None),
+    "rds-busy": ({"statistical_anomaly"}, set(), None),
+    "rds-idle": ({"idle_database"}, set(), "recommend_review"),
+    "rds-storage": ({"low_storage"}, set(), "recommend_review"),
 }
 
 
@@ -253,7 +261,8 @@ def test_policies_match_migrations():
     import re
 
     sql = "".join((ROOT / "db" / "migrations" / f).read_text(encoding="utf-8")
-                  for f in ("004_seed_policies.sql", "006_security_and_seed.sql", "010_recommend_review_policy.sql"))
+                  for f in ("004_seed_policies.sql", "006_security_and_seed.sql", "010_recommend_review_policy.sql",
+                            "013_rds_review_policies.sql"))
     seeded = [json.loads(c) for c in re.findall(r"'(\{\"AND\".*?\})'", sql)]
     for p in POLICIES:
         assert p["name"] in sql
