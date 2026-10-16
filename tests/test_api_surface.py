@@ -209,3 +209,66 @@ def test_config_writes_are_rate_limited(client):
     codes = [client.patch("/api/v1/system/config", json=body, headers=_h("operator-1")).status_code
              for _ in range(21)]
     assert codes[:20] == [200] * 20 and codes[20] == 429
+
+
+class _StaleConn:
+    def __init__(self, rows):
+        self.rows, self.calls = rows, []
+
+    async def fetch(self, sql, *args):
+        self.calls.append((sql, args))
+        return self.rows
+
+
+class _StalePool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        from contextlib import asynccontextmanager
+        conn = self.conn
+
+        @asynccontextmanager
+        async def ctx():
+            yield conn
+        return ctx()
+
+
+def _healthy_probe(monkeypatch):
+    async def fake_probe(body, issues, is_leader):
+        body["db"] = {"status": "ok", "latency_ms": 1.0}
+        return True
+
+    from backend.app.services.safety_layer import SafetyLayer
+    monkeypatch.setattr(health, "_probe_db", fake_probe)
+    monkeypatch.setattr(SafetyLayer, "budget_status", lambda self: (False, ""))
+
+
+def test_one_silent_resource_is_reported(client, monkeypatch):
+    """Regression: only the newest sample overall was checked, so one instance
+    that stopped reporting was invisible while any other still reported."""
+    from backend.app import scheduler
+    _healthy_probe(monkeypatch)
+    conn = _StaleConn([{"name": "web-1", "resource_type": "ec2"}, {"name": "orders", "resource_type": "rds"}])
+    monkeypatch.setattr(health, "get_pool", lambda: _StalePool(conn))
+    monkeypatch.setattr(scheduler, "is_leader", lambda: True)
+    for _ in range(3):
+        body = client.get("/api/v1/system/health", headers=_h("user-1")).json()
+    assert body["telemetry"]["stale_resources"] == 2
+    assert body["telemetry"]["stale_examples"] == ["ec2:web-1", "rds:orders"]
+    assert "telemetry_stale_resources" in body["issues"] and body["status"] == "degraded"
+    assert len(conn.calls) == 1  # cached: not one scan per request
+    sql, args = conn.calls[0]
+    assert args == (health.TELEMETRY_STALE_MINUTES,)
+    assert "'ec2' AND r.state = 'running'" in sql and "'rds' AND r.state = 'available'" in sql
+    assert "lambda" not in sql  # reports nothing while not invoked
+
+
+def test_stale_resource_probe_failure_does_not_break_health(client, monkeypatch):
+    _healthy_probe(monkeypatch)
+
+    def no_pool():
+        raise RuntimeError("pool not initialised")
+    monkeypatch.setattr(health, "get_pool", no_pool)
+    res = client.get("/api/v1/system/health", headers=_h("user-1"))
+    assert res.status_code == 200 and "telemetry_stale_resources" not in res.json()["issues"]

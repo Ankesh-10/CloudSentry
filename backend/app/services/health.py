@@ -19,9 +19,32 @@ JOB_FAILURE_ALERT = 3
 PUBLIC_CACHE_SECONDS = 5.0
 # budget_status pages a month of cost_records; never run it per request.
 BUDGET_CACHE_SECONDS = 60.0
+STALE_RESOURCES_CACHE_SECONDS = 60.0
+STALE_EXAMPLES = 5
 
 _public_cache: dict = {"body": None, "at": 0.0}
 _budget_cache: dict = {"value": None, "at": 0.0}
+_stale_cache: dict = {"value": None, "at": 0.0}
+
+# The newest sample overall hides a single resource that stopped reporting.
+# Only types that report on a fixed period while up are checked: Lambda emits
+# nothing when not invoked, S3/EBS have no collected metrics. One index probe
+# per resource (resource_metrics (resource_id, time DESC)).
+_STALE_RESOURCES_SQL = """
+SELECT COALESCE(r.name, r.provider_id) AS name, r.resource_type
+FROM resources r
+LEFT JOIN LATERAL (
+    SELECT m.time FROM resource_metrics m
+    WHERE m.resource_id = r.id
+    ORDER BY m.time DESC
+    LIMIT 1
+) last ON true
+WHERE ((r.resource_type = 'ec2' AND r.state = 'running')
+       OR (r.resource_type = 'rds' AND r.state = 'available'))
+  AND r.first_seen < NOW() - make_interval(mins => $1)
+  AND (last.time IS NULL OR last.time < NOW() - make_interval(mins => $1))
+ORDER BY r.resource_type, name
+"""
 
 
 def models_dir_writable(path: str) -> bool:
@@ -38,6 +61,7 @@ def models_dir_writable(path: str) -> bool:
 def reset_caches() -> None:
     _public_cache.update(body=None, at=0.0)
     _budget_cache.update(value=None, at=0.0)
+    _stale_cache.update(value=None, at=0.0)
 
 
 async def _probe_db(body: dict, issues: list[str], is_leader: bool) -> bool:
@@ -59,6 +83,17 @@ async def _probe_db(body: dict, issues: list[str], is_leader: bool) -> bool:
         logger.warning("Health DB probe failed: %s", e)
         issues.append("database_unreachable")
         return False
+
+
+async def _stale_resources() -> list[dict]:
+    """Running EC2 / available RDS with no sample for TELEMETRY_STALE_MINUTES."""
+    now = time.monotonic()
+    if _stale_cache["value"] is None or now - _stale_cache["at"] >= STALE_RESOURCES_CACHE_SECONDS:
+        async with get_pool().acquire() as conn:
+            rows = await conn.fetch(_STALE_RESOURCES_SQL, TELEMETRY_STALE_MINUTES)
+        _stale_cache["value"] = [dict(r) for r in rows]
+        _stale_cache["at"] = now
+    return _stale_cache["value"]
 
 
 async def _budget_status():
@@ -128,6 +163,14 @@ async def collect_health(detailed: bool = False) -> dict:
             issues.append(f"job_failing:{name}")
 
     if db_ok:
+        try:
+            stale = await _stale_resources()
+            body["telemetry"]["stale_resources"] = len(stale)
+            body["telemetry"]["stale_examples"] = [f"{r['resource_type']}:{r['name']}" for r in stale[:STALE_EXAMPLES]]
+            if stale and scheduler.is_leader():
+                issues.append("telemetry_stale_resources")
+        except Exception as e:
+            logger.warning("Health stale-resource probe failed: %s", e)
         try:
             over, reason = await _budget_status()
             body["budget"] = {"over_budget": over, "reason": reason or None}

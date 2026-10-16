@@ -204,7 +204,7 @@ SCENARIOS = {
     "outage": Scenario(
         "*", silent=True, masks=True, wait="30 min",
         shows="no demo samples: metric rules stop evaluating; /system/health reports "
-              "telemetry_stale if nothing else writes metrics."),
+              "telemetry_stale_resources (each demo EC2/RDS), and telemetry_stale if nothing else reports."),
 }
 
 # (minute, [(on|off, scenario|all)], what to point at). Assumes the backend runs

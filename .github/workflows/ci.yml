@@ -156,6 +156,29 @@ jobs:
             "INSERT INTO optimization_actions (action_type, status) VALUES ('terminate_ec2', 'pending');"; then
             echo "unknown action_type was accepted"; exit 1
           fi
+      - name: Health's stale-resource query runs on the real schema
+        run: |
+          python - <<'EOF'
+          import asyncio, os, re
+          import asyncpg
+          src = open("backend/app/services/health.py", encoding="utf-8").read()
+          sql = re.search(r'_STALE_RESOURCES_SQL = """(.*?)"""', src, re.S).group(1)
+          async def main():
+              conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+              old = "NOW() - interval '2 hours'"
+              await conn.execute(
+                  "INSERT INTO resources (provider_id, resource_type, region, state, first_seen) VALUES "
+                  f"('i-ci-silent', 'ec2', 'us-east-1', 'running', {old}), "
+                  f"('i-ci-busy', 'ec2', 'us-east-1', 'running', {old}), "
+                  f"('fn-ci', 'lambda', 'us-east-1', 'available', {old})")
+              await conn.execute(
+                  "INSERT INTO resource_metrics (time, resource_id, metric_name, value) "
+                  "SELECT NOW(), id, 'CPUUtilization', 1 FROM resources WHERE provider_id = 'i-ci-busy'")
+              rows = await conn.fetch(sql, 30)
+              assert [r["name"] for r in rows] == ["i-ci-silent"], rows
+              await conn.close()
+          asyncio.run(main())
+          EOF
 
   docker:
     runs-on: ubuntu-latest

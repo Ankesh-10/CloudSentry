@@ -158,6 +158,7 @@ All settings are environment variables (see `.env.example` for the full, comment
 * JSON logs (`LOG_FORMAT=json`) with `request_id` and any `extra=` fields; credentials (DSN passwords, bearer tokens, JWTs, AWS keys) are scrubbed from messages and tracebacks.
 * `/metrics` (Prometheus text): HTTP requests by route template and status, durations, action outcomes, alert deliveries, job runs, consecutive job failures.
 * Alerts via `ALERT_WEBHOOK_URL` (https only), de-duplicated per event for `ALERT_MIN_INTERVAL_SECONDS`.
+* `/system/health` reports `telemetry_stale` when no metric at all arrived for 30 min, and `telemetry_stale_resources` when a running EC2 instance or available RDS database has had no sample for 30 min although others still report (`telemetry.stale_resources` = count, `stale_examples` = up to 5 names). Lambda is not checked: it reports nothing while not invoked.
 
 ## Deployment
 
