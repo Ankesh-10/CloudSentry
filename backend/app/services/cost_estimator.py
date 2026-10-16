@@ -7,6 +7,7 @@ count. These are estimates (source='estimated'), not billing data.
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -21,6 +22,36 @@ BYTES_PER_GB = 1024 ** 3
 BILLABLE_EC2_STATES = {"running", "pending", "stopping"}
 BILLABLE_RDS_STATES = {"available", "backing-up", "modifying", "starting", "stopping"}
 PRICING_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/pricing"))
+FALLBACK_REGION = "us-east-1"
+# EC2 and RDS list prices scale with the size's normalization factor inside a
+# family (m5.xlarge = 2 x m5.large), so one listed size prices all the others.
+SIZE_FACTORS = {"nano": 0.25, "micro": 0.5, "small": 1.0, "medium": 2.0, "large": 4.0, "xlarge": 8.0}
+
+
+def _size_factor(size: str):
+    if size in SIZE_FACTORS:
+        return SIZE_FACTORS[size]
+    m = re.fullmatch(r"(\d+)xlarge", size)
+    return 8.0 * int(m.group(1)) if m else None  # "metal" and unknown sizes: no estimate
+
+
+def list_price(table: dict, name) -> Optional[float]:
+    """Listed price of `name` (e.g. "m5.xlarge", "db.r6g.large"), else derived
+    from a listed size of the same family; None if the family is unknown."""
+    if not name or not isinstance(table, dict):
+        return None
+    if name in table:
+        return float(table[name])
+    family, _, size = str(name).rpartition(".")
+    factor = _size_factor(size)
+    if not family or factor is None:
+        return None
+    for known, price in table.items():
+        known_family, _, known_size = known.rpartition(".")
+        known_factor = _size_factor(known_size)
+        if known_family == family and known_factor:
+            return float(price) * factor / known_factor
+    return None
 
 
 def load_pricing(region: str) -> dict:
@@ -50,6 +81,18 @@ class CostEstimationService:
             self._pricing_by_region[region] = load_pricing(region)
         return self._pricing_by_region[region]
 
+    def _list_price(self, kind: str, name, region) -> Optional[float]:
+        price = list_price(self._pricing_for(region).get(kind, {}), name)
+        if price is None and region and region != FALLBACK_REGION:
+            # A regional file covers fewer types; the us-east-1 price is a closer
+            # estimate than none (regional prices differ by roughly 5-20%).
+            price = list_price(self._pricing_for(FALLBACK_REGION).get(kind, {}), name)
+            if price is not None and f"approx:{kind}:{name}:{region}" not in self._unpriced_warned:
+                self._unpriced_warned.add(f"approx:{kind}:{name}:{region}")
+                logger.warning("No %s list price for %s in %s; using the us-east-1 price as an approximation.",
+                               kind, name, region)
+        return price
+
     def _warn_unpriced(self, key: str) -> None:
         if key not in self._unpriced_warned:
             self._unpriced_warned.add(key)
@@ -67,21 +110,21 @@ class CostEstimationService:
             if state not in BILLABLE_EC2_STATES:
                 return 0.0
             inst_type = meta.get("instance_type")
-            price = pricing.get("ec2", {}).get(inst_type)
+            price = self._list_price("ec2", inst_type, resource.get("region"))
             if price is None:
                 self._warn_unpriced(f"ec2:{inst_type}")
                 return 0.0
-            return float(price)
+            return price
 
         if rtype == "rds":
             if state not in BILLABLE_RDS_STATES:
                 return 0.0
             cls = meta.get("instance_class")
-            price = pricing.get("rds", {}).get(cls)
+            price = self._list_price("rds", cls, resource.get("region"))
             if price is None:
                 self._warn_unpriced(f"rds:{cls}")
                 return 0.0
-            return float(price)
+            return price
 
         if rtype == "ebs":
             # Volumes bill for provisioned size whether attached or not.

@@ -151,7 +151,7 @@ All settings are environment variables (see `.env.example` for the full, comment
 | Telemetry | CloudWatch, per region | **not implemented** (no metric-based detection) |
 | Actions | stop/start EC2, Lambda concurrency, tags (+ rollback) | stop/start VMs with live-state verification |
 | Tags/labels | yes | not yet |
-| Pricing | `data/pricing/aws_<region>.json` (us-east-1 fallback) | — |
+| Pricing | `data/pricing/aws_<region>.json`: EC2 (Linux) and RDS (MySQL Single-AZ) on-demand list prices for common families; other sizes of a listed family are derived by size, and a type missing from a regional file uses the us-east-1 price (logged as an approximation) | — |
 
 ## Observability
 
