@@ -39,11 +39,9 @@ actions you can approve; executing one still needs GLOBAL_AUTOMATION_ENABLED=tru
 (otherwise it shows as blocked by the kill-switch, which is a scenario too).
 
 Backend settings for a quick demo: JOB_PIPELINE_MINUTES=1, ML_IDLE_WINDOW_HOURS=0.1
-(idle must last the whole window: 6 min) and, for `ml-anomaly`,
-ML_IF_DECISION_THRESHOLD=-0.05: at the default 0 the model calls ~5% of normal
-samples anomalous by design, so demo-ml-api raises a false alarm in about a
-third of 20-minute runs; at -0.05, about one in ten, and the flood is still
-always caught.
+(idle must last the whole window: 6 min). Keep ML_IF_DECISION_THRESHOLD at its
+default (-0.05): at 0, demo-ml-api raises a false ML alarm in about a third of
+20-minute runs.
 """
 import argparse
 import json
@@ -198,9 +196,8 @@ SCENARIOS = {
         shows="free storage ~6% of 20 GiB: low_storage -> recommend_review (needs approval)."),
     "ml-anomaly": Scenario(
         "ml", mode="quiet-flood", wait="1-2 min",
-        shows="CPU ~3% while network floods: ml_behavioral_anomaly once `train-ml` ran (best with "
-              "ML_IF_DECISION_THRESHOLD=-0.05) "
-              "(without a model only EWMA looks, and it flags the CPU drop for a minute at most)."),
+        shows="CPU ~3% while network floods: ml_behavioral_anomaly once `train-ml` ran "
+              "(without a model nothing flags it: the CPU drop is left to the idle rule)."),
     "outage": Scenario(
         "*", silent=True, masks=True, wait="30 min",
         shows="no demo samples: metric rules stop evaluating; /system/health reports "

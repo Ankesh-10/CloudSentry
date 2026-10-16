@@ -178,3 +178,16 @@ def test_model_fitted_on_the_older_feature_set_still_scores(tmp_path):
     joblib.dump(IsolationForest(random_state=0).fit(feats), os.path.join(tmp_path, "if_ec2_latest.pkl"))
     result = InferenceEngine(models_dir=str(tmp_path)).predict(feats.iloc[-1:], "ec2")
     assert "score" in result and "reason" in result and "Missing" not in result["reason"]
+
+
+def test_default_threshold_is_stricter_than_the_contamination_boundary(monkeypatch):
+    """At 0 the model flags ~5% of normal samples by design; the -0.05 default
+    must keep recall and lift precision on every evaluated scenario."""
+    from backend.app.config import Settings, settings
+    from ml import evaluation
+    assert Settings.model_fields["ML_IF_DECISION_THRESHOLD"].default == -0.05
+    monkeypatch.setattr(settings, "ML_IF_DECISION_THRESHOLD", -0.05)
+    for scenario in evaluation.SCENARIOS:
+        np.random.seed(0)
+        result = evaluation.evaluate_scenario(scenario)
+        assert result["recall"] >= 0.95 and result["precision"] >= 0.85, (scenario, result)

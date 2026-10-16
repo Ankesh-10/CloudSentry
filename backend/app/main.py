@@ -52,7 +52,7 @@ def validate_startup_config() -> None:
     if settings.ML_ANOMALY_THRESHOLD is not None:
         logger.warning(
             "ML_ANOMALY_THRESHOLD is deprecated and ignored (it used the score_samples scale). "
-            "Use ML_IF_DECISION_THRESHOLD (default 0.0)."
+            "Use ML_IF_DECISION_THRESHOLD (default -0.05)."
         )
     if problems:
         raise RuntimeError("CloudSentry misconfigured, missing: " + "; ".join(problems))

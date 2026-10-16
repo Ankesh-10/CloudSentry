@@ -24,7 +24,7 @@ from ml.trainer import ModelTrainer
 logger = logging.getLogger(__name__)
 
 TARGETS = {"precision": 0.60, "recall": 0.70}
-SCENARIOS = ["runaway_lambda.json"]
+SCENARIOS = ["runaway_lambda.json", "idle_ec2.json"]
 SEED = 0
 
 

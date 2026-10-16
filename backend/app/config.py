@@ -72,7 +72,10 @@ class Settings(BaseSettings):
     # ML_CONTAMINATION; negative = stricter). Renamed from ML_ANOMALY_THRESHOLD,
     # which was compared against score_samples (-0.3 there flagged ~every point):
     # a new name so an old value is never silently reinterpreted on a new scale.
-    ML_IF_DECISION_THRESHOLD: float = 0.0
+    # 0 flags the ML_CONTAMINATION share (~5%) of *normal* samples by design: one
+    # false alarm per resource every ~100 min at 5-minute samples. -0.05 lifts
+    # offline precision from ~0.7 to 0.9+ at unchanged recall (ml/evaluation.py).
+    ML_IF_DECISION_THRESHOLD: float = -0.05
     ML_ANOMALY_THRESHOLD: Optional[float] = None  # deprecated, ignored (warned at startup)
     ML_CONTAMINATION: float = 0.05
     # Training: threads (small instances: keep 1), sample cap per resource type,

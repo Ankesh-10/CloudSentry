@@ -82,6 +82,7 @@ def demo(tmp_path, monkeypatch):
 def backend(fake_db, tmp_path, monkeypatch):
     """Quick-demo backend settings, and no model unless a test trains one."""
     monkeypatch.setattr(settings, "ML_IDLE_WINDOW_HOURS", 0.1)
+    monkeypatch.setattr(settings, "ML_IF_DECISION_THRESHOLD", -0.05)  # the default (conftest pins 0)
     monkeypatch.setattr(settings, "ML_MODEL_PATH", str(tmp_path / "models"))
     (tmp_path / "models").mkdir()
     for i, p in enumerate(POLICIES):
