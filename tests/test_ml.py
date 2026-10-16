@@ -20,6 +20,15 @@ def _features(scenario, rtype):
     return feats, labels.loc[feats.index]
 
 
+def _normal(scenario="idle_ec2.json", rtype="ec2"):
+    """Training data without the labelled anomaly. The scenarios put the
+    anomaly in the last 100 points, i.e. ~28% of the trainer's 20% holdout -
+    over ML_MAX_HOLDOUT_FLAG_RATE, so a model trained on all of it is
+    (correctly) rejected by the promotion gate."""
+    feats, labels = _features(scenario, rtype)
+    return feats[~labels.values]
+
+
 def test_inference_does_not_flag_normal_behaviour(tmp_path):
     """Regression: thresholding score_samples at -0.3 flagged ~100% of points."""
     feats, labels = _features("idle_ec2.json", "ec2")
@@ -94,7 +103,7 @@ def test_promoted_model_has_metadata_and_versioned_predictions(tmp_path):
 
 def test_model_failing_validation_is_not_promoted(tmp_path, monkeypatch):
     from backend.app.config import settings
-    feats, _ = _features("idle_ec2.json", "ec2")
+    feats = _normal()
     monkeypatch.setattr(settings, "ML_MAX_HOLDOUT_FLAG_RATE", -1.0)  # nothing can pass
     trainer = ModelTrainer(models_dir=str(tmp_path))
     assert trainer.train_isolation_forest(feats, "ec2") is False
@@ -104,7 +113,7 @@ def test_model_failing_validation_is_not_promoted(tmp_path, monkeypatch):
 
 def test_rejected_retrain_keeps_previous_model(tmp_path, monkeypatch):
     from backend.app.config import settings
-    feats, _ = _features("idle_ec2.json", "ec2")
+    feats = _normal()
     trainer = ModelTrainer(models_dir=str(tmp_path))
     assert trainer.train_isolation_forest(feats, "ec2")
     before = os.path.getmtime(os.path.join(tmp_path, "if_ec2_latest.pkl"))
@@ -115,7 +124,7 @@ def test_rejected_retrain_keeps_previous_model(tmp_path, monkeypatch):
 
 def test_model_from_other_sklearn_version_is_not_loaded(tmp_path):
     import json
-    feats, _ = _features("idle_ec2.json", "ec2")
+    feats = _normal()
     assert ModelTrainer(models_dir=str(tmp_path)).train_isolation_forest(feats, "ec2")
     meta_path = os.path.join(tmp_path, "if_ec2_latest.json")
     with open(meta_path) as f:
@@ -127,7 +136,7 @@ def test_model_from_other_sklearn_version_is_not_loaded(tmp_path):
 
 
 def test_drift_is_measured_against_previous_model(tmp_path):
-    feats, _ = _features("idle_ec2.json", "ec2")
+    feats = _normal()
     trainer = ModelTrainer(models_dir=str(tmp_path))
     assert trainer.train_isolation_forest(feats, "ec2")
     assert trainer.last_result["drift_vs_previous"] is None  # first model
@@ -147,3 +156,25 @@ def test_evaluation_does_not_touch_production_models():
     evaluate_scenario("idle_ec2.json")
     after = {f: os.path.getmtime(os.path.join(prod, f)) for f in os.listdir(prod)} if os.path.isdir(prod) else {}
     assert before == after
+
+
+def test_clean_history_passes_the_promotion_gate(tmp_path):
+    """Regression: the 24h rolling average is a drifting level, so the time-ordered
+    holdout sat outside its training range and ~25-30% of clean data was flagged:
+    no model trained on normal behaviour could be promoted."""
+    import json
+    trainer = ModelTrainer(models_dir=str(tmp_path))
+    assert trainer.train_isolation_forest(_normal(), "ec2") is True
+    assert trainer.last_result["holdout_flag_rate"] < 0.15
+    with open(os.path.join(tmp_path, "if_ec2_latest.json")) as f:
+        assert "rolling_avg_cpu_24h" not in json.load(f)["feature_columns"]
+
+
+def test_model_fitted_on_the_older_feature_set_still_scores(tmp_path):
+    import joblib
+    from sklearn.ensemble import IsolationForest
+    feats = _normal()
+    assert "rolling_avg_cpu_24h" in feats.columns  # still computed for callers
+    joblib.dump(IsolationForest(random_state=0).fit(feats), os.path.join(tmp_path, "if_ec2_latest.pkl"))
+    result = InferenceEngine(models_dir=str(tmp_path)).predict(feats.iloc[-1:], "ec2")
+    assert "score" in result and "reason" in result and "Missing" not in result["reason"]

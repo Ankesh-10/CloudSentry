@@ -16,7 +16,7 @@ import tempfile
 from sklearn.metrics import classification_report, f1_score, precision_score, recall_score
 
 from backend.app.config import settings
-from ml.features import build_training_dataset
+from ml.features import build_training_dataset, model_features
 from ml.inference import InferenceEngine
 from ml.synthetic.generator import generate_from_scenario
 from ml.trainer import ModelTrainer
@@ -55,7 +55,7 @@ def evaluate_scenario(scenario_file: str, seed: int | None = SEED):
             return None
         model = InferenceEngine(models_dir=tmp)._load_model(resource_type)
         # Same decision rule as production InferenceEngine.predict().
-        decisions = model.decision_function(holdout)
+        decisions = model.decision_function(model_features(holdout))
     predictions = [d < settings.ML_IF_DECISION_THRESHOLD for d in decisions]
 
     metrics = {

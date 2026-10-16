@@ -98,6 +98,15 @@ class InferenceEngine:
         # `contamination` at fit time: < 0 means "more anomalous than the
         # expected contamination share". Raw score_samples sit around -0.4..-0.6
         # for *normal* points, so thresholding them at -0.3 flagged everything.
+        # Score with exactly the columns the model was fitted on: models from
+        # before NON_MODEL_FEATURES keep working, and a new feature column
+        # never breaks an older model.
+        columns = getattr(model, "feature_names_in_", None)
+        if columns is not None:
+            missing = [c for c in columns if c not in features_df.columns]
+            if missing:
+                return {"is_anomaly": False, "reason": f"Missing features: {', '.join(missing)}"}
+            features_df = features_df[list(columns)]
         decision = float(model.decision_function(features_df)[-1])
         threshold = settings.ML_IF_DECISION_THRESHOLD
         is_anomaly = decision < threshold

@@ -11,6 +11,7 @@ import sklearn
 from sklearn.ensemble import IsolationForest
 
 from backend.app.config import settings
+from ml.features import model_features
 from ml.inference import DEFAULT_MODELS_DIR, metadata_path, read_metadata
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ class ModelTrainer:
         only if validation passes. Returns True when a model was promoted;
         details (including a rejection reason) are in self.last_result."""
         self.last_result = {"resource_type": resource_type, "promoted": False}
+        features_df = model_features(features_df)
         if len(features_df) < MIN_TRAINING_ROWS:
             logger.warning("Not enough data to train IF model for %s. Need %s, got %s",
                            resource_type, MIN_TRAINING_ROWS, len(features_df))

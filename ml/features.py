@@ -12,6 +12,18 @@ def _pivot_metrics(df: pd.DataFrame) -> pd.DataFrame:
     return pivoted.ffill().fillna(0.0)
 
 
+# Computed (callers read them) but not given to the Isolation Forest. A 24h
+# rolling average is a slowly drifting *level*: the time-ordered holdout always
+# sits a little outside the range the model was trained on, so a model fitted on
+# clean data flagged ~25-30% of the next day and the promotion gate rejected it.
+# cpu_deviation_ratio carries the same signal relative to that average.
+NON_MODEL_FEATURES = ("rolling_avg_cpu_24h",)
+
+
+def model_features(features: pd.DataFrame) -> pd.DataFrame:
+    return features.drop(columns=[c for c in NON_MODEL_FEATURES if c in features.columns])
+
+
 def _fill_expected(features: pd.DataFrame) -> pd.DataFrame:
     expected_cols = [
         "time_of_day",
