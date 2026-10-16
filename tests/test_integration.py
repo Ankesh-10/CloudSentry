@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import boto3
 import pytest
 from fastapi.testclient import TestClient
-from jose import jwt
+import jwt
 from moto import mock_aws
 
 from backend.app.config import settings
@@ -25,7 +25,7 @@ NOW = datetime.now(timezone.utc)
 def _auth(sub):
     tok = jwt.encode({"sub": sub, "aud": "authenticated", "role": "authenticated", "exp": int(time.time()) + 600,
                       "iss": "https://example.supabase.co/auth/v1"},
-                     "test-secret-key-for-hs256", algorithm="HS256")
+                     "test-secret-key-for-hs256-at-least-32-bytes", algorithm="HS256")
     return {"Authorization": f"Bearer {tok}"}
 
 

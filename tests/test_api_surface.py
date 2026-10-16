@@ -3,7 +3,7 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
-from jose import jwt
+import jwt
 
 from backend.app import rate_limit
 from backend.app.config import settings

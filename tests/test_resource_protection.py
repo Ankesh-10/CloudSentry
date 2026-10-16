@@ -5,7 +5,7 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
-from jose import jwt
+import jwt
 
 from backend.app.config import settings
 from backend.app.main import app

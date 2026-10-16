@@ -20,7 +20,8 @@ from typing import Optional
 import httpx
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
+import jwt
+from jwt.exceptions import PyJWKError, PyJWTError
 
 from backend.app.config import settings
 
@@ -99,6 +100,7 @@ def _get_jwks(force: bool = False) -> list:
 
 
 def _find_jwk(kid: Optional[str]) -> Optional[dict]:
+    """The JWKS entry (a dict) with this kid, refetching once if unknown."""
     # A missing kid would otherwise match whichever key happens to be first.
     if not kid:
         return None
@@ -112,13 +114,13 @@ def _find_jwk(kid: Optional[str]) -> Optional[dict]:
 def _decode(token: str) -> dict:
     try:
         header = jwt.get_unverified_header(token)
-    except JWTError:
+    except PyJWTError:
         raise _unauthorized()
 
-    alg = header.get("alg")
+    alg = header.get("alg") if isinstance(header, dict) else None
     issuer = _issuer()
-    options = {"require_exp": True, "require_aud": True, "verify_aud": True,
-               "require_iss": bool(issuer), "verify_iss": bool(issuer)}
+    required = ["exp", "aud"] + (["iss"] if issuer else [])
+    options = {"require": required, "verify_aud": True, "verify_iss": bool(issuer)}
     kwargs = {"audience": settings.JWT_AUDIENCE, "options": options}
     if issuer:
         kwargs["issuer"] = issuer
@@ -128,11 +130,14 @@ def _decode(token: str) -> dict:
                 raise _not_configured()
             return jwt.decode(token, settings.SUPABASE_JWT_SECRET, algorithms=["HS256"], **kwargs)
         if alg in ASYMMETRIC_ALGS:
-            key = _find_jwk(header.get("kid"))
-            if key is None:
+            jwk = _find_jwk(header.get("kid"))
+            if jwk is None:
                 raise _unauthorized()
+            # The JWK becomes a public-key object for exactly this algorithm;
+            # a key of the wrong type (e.g. RSA for ES256) is rejected here.
+            key = jwt.PyJWK(jwk, algorithm=alg).key
             return jwt.decode(token, key, algorithms=[alg], **kwargs)
-    except JWTError:
+    except (PyJWTError, PyJWKError):
         raise _unauthorized()
     # "none" and any other algorithm are rejected outright.
     raise _unauthorized()

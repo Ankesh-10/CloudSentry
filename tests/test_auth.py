@@ -6,7 +6,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
-from jose import jwt
+import jwt
 
 from backend.app import auth
 from backend.app.main import app
@@ -151,7 +151,18 @@ def test_viewer_role_can_be_disabled(client, monkeypatch):
 
 
 def test_forged_empty_key_rejected(client):
-    bad = jwt.encode(_claims("attacker"), "", algorithm="HS256")
+    # PyJWT refuses to sign with an empty key, so build the attacker's token by hand.
+    import hmac
+    import json
+    from hashlib import sha256
+
+    def b64(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    signing_input = (b64(json.dumps({"alg": "HS256", "typ": "JWT"}).encode()) + "."
+                     + b64(json.dumps(_claims("attacker")).encode()))
+    sig = b64(hmac.new(b"", signing_input.encode(), sha256).digest())
+    bad = f"{signing_input}.{sig}"
     assert client.get("/api/v1/resources/", headers=_h(bad)).status_code == 401
 
 

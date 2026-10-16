@@ -6,7 +6,7 @@ import time
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from jose import jwt
+import jwt
 
 from backend.app import metrics
 from backend.app.config import settings

@@ -6,7 +6,7 @@ import pytest
 # settings read it from the working directory — can never point the test run at
 # a live database, Supabase project or AWS account.
 _TEST_ENV = {
-    "SUPABASE_JWT_SECRET": "test-secret-key-for-hs256",
+    "SUPABASE_JWT_SECRET": "test-secret-key-for-hs256-at-least-32-bytes",
     "JWT_AUDIENCE": "authenticated",
     "SUPABASE_URL": "https://example.supabase.co",
     "SUPABASE_JWKS_URL": "https://example.supabase.co/auth/v1/.well-known/jwks.json",

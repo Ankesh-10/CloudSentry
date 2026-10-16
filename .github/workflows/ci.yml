@@ -47,11 +47,7 @@ jobs:
       - name: Dependency audit (pip-audit)
         run: |
           pip install "pip-audit>=2.7"
-          # GHSA-wj6h-64fc-37mp / CVE-2024-23342: Minerva timing side channel in
-          # `ecdsa` (pulled in by python-jose), no fixed release exists. Not
-          # exploitable here: python-jose[cryptography] verifies ES256 with the
-          # `cryptography` backend, and this service never signs with ECDSA.
-          pip-audit -r backend/requirements.txt --strict --ignore-vuln GHSA-wj6h-64fc-37mp
+          pip-audit -r backend/requirements.txt --strict
 
   test:
     runs-on: ubuntu-latest

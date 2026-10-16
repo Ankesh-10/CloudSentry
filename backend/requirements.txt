@@ -6,8 +6,10 @@ fastapi>=0.111.0,<1
 uvicorn>=0.30.0,<1
 pydantic>=2.0.0,<3
 pydantic-settings>=2.0.0,<3
-# >=3.4.0: fixes CVE-2024-33663 (ECDSA alg confusion) and CVE-2024-33664 (JWE bomb)
-python-jose[cryptography]>=3.4.0,<4
+# PyJWT, not python-jose: jose is barely maintained and pulls in `ecdsa`, whose
+# Minerva timing side channel (CVE-2024-23342 / GHSA-wj6h-64fc-37mp) has no fix,
+# so pip-audit needed a standing exception.
+PyJWT[crypto]>=2.10,<3
 python-dotenv>=1.0.0,<2
 supabase>=2.7.0,<3
 asyncpg>=0.29.0,<1

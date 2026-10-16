@@ -260,7 +260,7 @@ def test_approving_expired_proposal_is_409(aws, fake_db):
     import os
     import time
     from fastapi.testclient import TestClient
-    from jose import jwt
+    import jwt
     from backend.app.main import app
 
     _seed(fake_db, "i-x", status="pending_approval", requires_approval=True)
