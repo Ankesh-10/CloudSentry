@@ -8,7 +8,7 @@ from backend.app.config import settings
 from backend.app.db.supabase_client import get_supabase_client
 from backend.app.services import alerts, runtime_config
 from backend.app.services.audit_logger import AuditLogger
-from backend.app.services.safety_layer import DESTRUCTIVE_ACTIONS, NO_CLOUD_ACTIONS, SafetyLayer
+from backend.app.services.safety_layer import DESTRUCTIVE_ACTIONS, NO_CLOUD_ACTIONS, SafetyLayer, is_synthetic
 
 logger = logging.getLogger(__name__)
 
@@ -221,8 +221,9 @@ class ActionRunner:
         now = _now().isoformat()
         # The mode in force *now* governs; the row's dry_run is rewritten to the
         # mode actually used so the audit trail is truthful.
-        if runtime_config.dry_run_mode():
-            message = f"Dry run mode: WOULD {action['action_type']} on {resource['provider_id']}"
+        if runtime_config.dry_run_mode() or is_synthetic(resource):
+            mode = "Dry run mode" if runtime_config.dry_run_mode() else "Synthetic demo resource"
+            message = f"{mode}: WOULD {action['action_type']} on {resource['provider_id']}"
             self._finish(action_id, resource, action, True, message, executed_at=now, dry=True, actor=actor)
             return True
 
@@ -424,7 +425,7 @@ class ActionRunner:
             return False
 
         original_was_dry = bool(original.get("dry_run")) or bool((original.get("post_state") or {}).get("dry_run"))
-        dry = original_was_dry or runtime_config.dry_run_mode()
+        dry = original_was_dry or runtime_config.dry_run_mode() or is_synthetic(resource)
         now = _now().isoformat()
         try:
             new_action_res = self.db.table("optimization_actions").insert({

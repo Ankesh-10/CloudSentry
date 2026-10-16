@@ -7,7 +7,7 @@ from backend.app.db.supabase_client import get_supabase_client
 from backend.app.services import alerts, runtime_config
 from backend.app.services.audit_logger import AuditLogger
 from backend.app.services.cost_estimator import CostEstimationService
-from backend.app.services.safety_layer import SafetyLayer
+from backend.app.services.safety_layer import SafetyLayer, is_synthetic
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +195,7 @@ class PolicyEngine:
                     "risk_level": matched_policy["risk_level"],
                     "requires_approval": bool(matched_policy["requires_approval"]),
                     "status": "pending_approval" if matched_policy["requires_approval"] else "pending",
-                    "dry_run": runtime_config.dry_run_mode(),
+                    "dry_run": runtime_config.dry_run_mode() or is_synthetic(resource),
                     "estimated_savings_usd": savings,
                     "created_at": now.isoformat(),
                 }).execute()

@@ -52,6 +52,12 @@ def _truthy(value) -> bool:
     return str(value or "").strip().lower() in {"true", "1", "yes"}
 
 
+def is_synthetic(resource: dict) -> bool:
+    """Demo rows written by scripts/telemetry_demo.py. Their provider ids do not
+    exist in any cloud, so every action on them is forced to dry-run."""
+    return (resource.get("metadata") or {}).get("synthetic") is True
+
+
 class SafetyLayer:
     def __init__(self):
         self.db = get_supabase_client()

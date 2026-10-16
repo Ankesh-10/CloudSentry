@@ -93,6 +93,18 @@ def test_dry_run_never_calls_aws(aws, fake_db):
     assert fake_db.rows("anomalies")[0]["status"] == "active"
 
 
+def test_synthetic_demo_resource_is_always_dry_run(aws, fake_db):
+    # Even a real instance id, if the row is marked synthetic, is never touched.
+    iid = _instance()
+    _seed(fake_db, iid, metadata={"synthetic": True})
+    _live()
+    assert ActionRunner().execute_action("a1") is True
+    assert _state(iid) == "running"
+    action = _action(fake_db)
+    assert action["status"] == "completed" and action["dry_run"] is True
+    assert action["post_state"]["result"].startswith("Synthetic demo resource: WOULD stop_ec2")
+
+
 def test_requires_approval_is_not_executable_until_approved(aws, fake_db):
     iid = _instance()
     _seed(fake_db, iid, status="pending_approval", requires_approval=True)
