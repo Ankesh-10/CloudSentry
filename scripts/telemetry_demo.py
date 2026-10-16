@@ -38,8 +38,8 @@ ids are not valid cloud ids. Most are unprotected, so policies really propose
 actions you can approve; executing one still needs GLOBAL_AUTOMATION_ENABLED=true
 (otherwise it shows as blocked by the kill-switch, which is a scenario too).
 
-Backend settings for a quick demo: JOB_PIPELINE_MINUTES=1, ML_IDLE_WINDOW_HOURS=1
-(the idle rule needs 12 samples: ~6 min at 30 s slots) and, for `ml-anomaly`,
+Backend settings for a quick demo: JOB_PIPELINE_MINUTES=1, ML_IDLE_WINDOW_HOURS=0.1
+(idle must last the whole window: 6 min) and, for `ml-anomaly`,
 ML_IF_DECISION_THRESHOLD=-0.05: at the default 0 the model calls ~5% of normal
 samples anomalous by design, so demo-ml-api raises a false alarm in about a
 third of 20-minute runs; at -0.05, about one in ten, and the flood is still
@@ -152,8 +152,7 @@ SCENARIOS = {
         shows="unusual_cpu_spike (Z-score, then EWMA). No policy matches: alert only."),
     "idle-ec2": Scenario(
         "worker", mode="idle", wait="~7 min",
-        shows="idle_compute -> stop_ec2 from 'Auto-stop idle EC2' (runs as a dry run). The CPU drop "
-              "is flagged first as unusual_cpu_spike."),
+        shows="idle_compute -> stop_ec2 from 'Auto-stop idle EC2' (runs as a dry run)."),
     "idle-protected": Scenario(
         "bastion", mode="idle", wait="~7 min",
         shows="idle_compute, no action: the resource is protected."),
@@ -174,8 +173,7 @@ SCENARIOS = {
         shows="unused_volume -> recommend_review waiting for approval (never deletes)."),
     "lambda-runaway": Scenario(
         "thumbnailer", mode="runaway", wait="1-2 min",
-        shows="runaway_lambda (HIGH) -> limit_lambda (auto; dry run). Left on, it lifts its own "
-              "baseline and turns into statistical_anomaly."),
+        shows="runaway_lambda (HIGH) -> limit_lambda (auto; dry run)."),
     "lambda-errors": Scenario(
         "webhook", mode="errors", wait="1-2 min",
         shows="runaway_lambda from a >20% error rate; confidence under the policy's 0.9: no action."),
@@ -197,8 +195,8 @@ SCENARIOS = {
 }
 
 # (minute, [(on|off, scenario|all)], what to point at). Assumes the backend runs
-# with JOB_PIPELINE_MINUTES=1 and ML_IDLE_WINDOW_HOURS=1. Idle goes first: it
-# needs 12 idle samples, so it is the slowest to show.
+# with JOB_PIPELINE_MINUTES=1 and ML_IDLE_WINDOW_HOURS=0.1. Idle goes first: it
+# has to last the whole 6-minute window, so it is the slowest to show.
 STORY = [
     (0, [("off", "all")],
      "Baseline: 12 healthy demo resources. Open the Dashboard and a resource page."),

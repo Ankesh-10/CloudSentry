@@ -84,3 +84,37 @@ def test_ewma_on_short_series_falls_back():
     rows = [{"time": now - timedelta(minutes=5 * i), "metric_name": "CPUUtilization", "value": 10.0} for i in range(10, 0, -1)]
     result = detect_anomaly_ewma(pd.DataFrame(rows), "CPUUtilization")
     assert "is_anomaly" in result
+
+
+def _cpu(values, step=timedelta(minutes=5), metric="CPUUtilization"):
+    now = datetime.now(timezone.utc)
+    return pd.DataFrame([{"time": now - step * (len(values) - i), "metric_name": metric, "value": v}
+                         for i, v in enumerate(values)])
+
+
+def test_only_a_cpu_rise_is_a_spike():
+    rise = detect_anomaly_zscore(_cpu([20.0, 22.0] * 15 + [90.0]), "CPUUtilization")
+    drop = detect_anomaly_zscore(_cpu([60.0, 62.0] * 15 + [5.0]), "CPUUtilization")
+    assert (rise["is_anomaly"], rise["anomaly_type"], rise["direction"]) == (True, "unusual_cpu_spike", "up")
+    assert (drop["is_anomaly"], drop["anomaly_type"], drop["direction"]) == (True, "statistical_anomaly", "down")
+    assert "fell well below" in drop["reason"]
+    ewma = detect_anomaly_ewma(_cpu([60.0, 62.0] * 20 + [5.0]), "CPUUtilization")
+    assert (ewma["anomaly_type"], ewma["direction"]) == ("statistical_anomaly", "down")
+
+
+def test_idle_window_is_measured_in_time_not_samples():
+    # 30 s samples: 13 of them cover a 6-minute window, 6 do not (the old rule wanted 12 of any age).
+    assert check_idle_compute(_cpu([1.0] * 13, step=timedelta(seconds=30)), "ec2", window_hours=0.1)["is_anomaly"]
+    short = check_idle_compute(_cpu([1.0] * 6, step=timedelta(seconds=30)), "ec2", window_hours=0.1)
+    assert short == {"is_anomaly": False, "evaluable": False}
+    # 12 samples at 5 min cover one hour, not the two the window asks for.
+    assert check_idle_compute(_cpu([1.0] * 12), "ec2", window_hours=2.0)["evaluable"] is False
+    assert "6 min" in check_idle_compute(_cpu([1.0] * 13, step=timedelta(seconds=30)), "ec2",
+                                         window_hours=0.1)["reason"]
+
+
+def test_runaway_lambda_stays_runaway_while_it_lasts():
+    """Regression: the mean baseline absorbed the runaway within minutes."""
+    df = _cpu([100.0] * 30 + [5000.0] * 12, metric="Invocations")
+    result = check_runaway_lambda(df, "lambda")
+    assert result["is_anomaly"] is True and result["anomaly_type"] == "runaway_lambda"

@@ -31,6 +31,11 @@ BEHAVIORAL_CLEAR_WINDOW = timedelta(minutes=30)
 _IN_CHUNK = 200
 
 
+def _latest(df: pd.DataFrame, metric_name: str) -> float:
+    values = df[df["metric_name"] == metric_name].sort_values("time")["value"]
+    return float(values.iloc[-1]) if not values.empty else 0.0
+
+
 def _num(value, default=0.0):
     """JSON/Postgres cannot store NaN or inf; numpy scalars are not JSON-serialisable."""
     if value is None:
@@ -123,6 +128,9 @@ class AnomalyDetectorService:
             self._apply_rule(resource_id, "idle_compute", idle_result, detected_at,
                              evaluable=idle_result.get("evaluable", True))
             if idle_result["is_anomaly"]:
+                # Idle explains what the statistics saw on the way down, and they
+                # are not evaluated while idle, so nothing else would clear them.
+                self._resolve_types(resource_id, STATISTICAL_TYPES, detected_at)
                 return
 
         runaway = check_runaway_lambda(df, resource_type)
@@ -162,6 +170,12 @@ class AnomalyDetectorService:
         else:
             result = detect_anomaly_ewma(df, metric, threshold=settings.ML_ZSCORE_THRESHOLD)
             result["model_version"] = "ewma_fallback"
+        if (result.get("is_anomaly") and resource_type == "ec2" and result.get("direction") == "down"
+                and _latest(df, metric) < settings.ML_IDLE_CPU_THRESHOLD_PCT):
+            # CPU falling to near zero is the idle rule's call, made once the
+            # quiet has lasted ML_IDLE_WINDOW_HOURS; flagging the fall itself
+            # would just be a noisy first chapter of the same story.
+            result = {**result, "is_anomaly": False, "reason": ""}
         result["_features"] = features
         return result
 

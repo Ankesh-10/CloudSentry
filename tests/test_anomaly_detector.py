@@ -179,3 +179,29 @@ def test_nan_scores_are_sanitised(detector, fake_db):
                              NOW.isoformat(), {"f": float("nan")})
     row = fake_db.rows("anomalies")[0]
     assert row["anomaly_score"] == 0.0 and row["confidence"] == 0.0 and row["features_snapshot"]["f"] is None
+
+
+def _cpu_records(values, end=NOW, step=timedelta(minutes=5)):
+    return [{"time": end - step * (len(values) - 1 - i), "metric_name": "CPUUtilization", "value": v}
+            for i, v in enumerate(values)]
+
+
+def test_cpu_falling_to_idle_is_not_a_spike(detector, fake_db):
+    tags = {"Project": "p", "Owner": "o"}
+    detector.process_resource(_resource(tags=tags), _cpu_records([30.0, 32.0] * 20 + [1.0]), NOW)
+    assert _types(fake_db) == []
+
+
+def test_cpu_drop_that_is_not_idle_is_a_statistical_anomaly(detector, fake_db):
+    tags = {"Project": "p", "Owner": "o"}
+    detector.process_resource(_resource(tags=tags), _cpu_records([80.0, 82.0] * 20 + [30.0]), NOW)
+    assert _types(fake_db) == ["statistical_anomaly"]
+
+
+def test_going_idle_resolves_statistical_anomalies(detector, fake_db):
+    tags = {"Project": "p", "Owner": "o"}
+    detector._record_anomaly("r1", {"is_anomaly": True, "anomaly_type": "unusual_cpu_spike", "severity": "LOW"},
+                             NOW.isoformat(), {})
+    detector.process_resource(_resource(tags=tags), _idle_records(), NOW)
+    assert _types(fake_db) == ["idle_compute"]
+    assert _types(fake_db, "resolved") == ["unusual_cpu_spike"]

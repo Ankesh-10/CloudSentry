@@ -42,10 +42,9 @@ POLICIES = [
 ]
 
 # scenario -> (anomalies it must raise, anomalies it may also raise, action it must lead to or None).
-# Going idle is a big CPU *drop*, which the Z-score test flags (as unusual_cpu_spike)
-# before the idle rule has its 12 samples. A runaway Lambda lifts its own
-# baseline, so after a few minutes the 10x rule stops and Z-score takes over.
-IDLE = ({"idle_compute", "unusual_cpu_spike"}, set())
+# Exact sets: going idle must not also read as a CPU "spike", and a runaway
+# Lambda must stay runaway_lambda while it lasts.
+IDLE = ({"idle_compute"}, set())
 EXPECTED = {
     "cpu-spike": ({"unusual_cpu_spike"}, set(), None),
     "idle-ec2": (*IDLE, "stop_ec2"),
@@ -54,7 +53,7 @@ EXPECTED = {
     "idle-do-not-stop": (*IDLE, None),
     "untagged": ({"untagged_resource"}, set(), "apply_tags"),
     "unused-volume": ({"unused_volume"}, set(), "recommend_review"),
-    "lambda-runaway": ({"runaway_lambda"}, {"statistical_anomaly"}, "limit_lambda"),
+    "lambda-runaway": ({"runaway_lambda"}, set(), "limit_lambda"),
     "lambda-errors": ({"runaway_lambda"}, set(), None),
     "lambda-surge": ({"statistical_anomaly"}, set(), None),
     "rds-busy": (set(), set(), None),
@@ -74,7 +73,7 @@ def demo(tmp_path, monkeypatch):
 @pytest.fixture
 def backend(fake_db, tmp_path, monkeypatch):
     """Quick-demo backend settings, and no model unless a test trains one."""
-    monkeypatch.setattr(settings, "ML_IDLE_WINDOW_HOURS", 1.0)
+    monkeypatch.setattr(settings, "ML_IDLE_WINDOW_HOURS", 0.1)
     monkeypatch.setattr(settings, "ML_MODEL_PATH", str(tmp_path / "models"))
     (tmp_path / "models").mkdir()
     for i, p in enumerate(POLICIES):
