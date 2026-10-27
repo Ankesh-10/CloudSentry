@@ -183,6 +183,8 @@ jobs:
               await conn.close()
           asyncio.run(main())
           EOF
+      - name: Verify-success RPC is atomic on the real schema
+        run: python scripts/check_complete_verified_action.py
 
   docker:
     runs-on: ubuntu-latest

@@ -86,3 +86,24 @@ def test_migration_013_only_recommends_for_rds():
         assert f"'{anomaly}'" in sql
     assert sql.count("'recommend_review'") == 2 and "recommend_review" in RDS_ALLOWED_ACTIONS
     assert "INSERT INTO schema_migrations (version) VALUES (13)" in sql
+
+
+SQL_014 = "014_complete_verified_action.sql"
+
+
+def test_migration_014_defines_the_verify_rpc_and_records_itself():
+    sql = _sql(SQL_014)
+    assert "CREATE OR REPLACE FUNCTION public.complete_verified_action(" in sql
+    assert "SET search_path = public" in sql
+    assert "INSERT INTO schema_migrations (version) VALUES (14)" in sql
+    # PostgREST only exposes a new function after a schema-cache reload.
+    assert "NOTIFY pgrst, 'reload schema'" in sql
+
+
+def test_migration_014_function_is_service_role_only():
+    """Functions are executable by PUBLIC by default; through PostgREST that
+    would let any dashboard user complete actions with service-role effect."""
+    sql = _sql(SQL_014)
+    for role in ("PUBLIC", "anon", "authenticated"):
+        assert re.search(rf"REVOKE ALL ON FUNCTION public\.complete_verified_action\([^)]*\) FROM {role}", sql), role
+    assert re.search(r"GRANT EXECUTE ON FUNCTION public\.complete_verified_action\([^)]*\) TO service_role", sql)

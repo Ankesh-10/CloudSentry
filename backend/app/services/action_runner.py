@@ -306,6 +306,7 @@ class ActionRunner:
             .execute()
         )
         verified = 0
+        unrecorded = 0
         now = _now()
         for action in res.data or []:
             resource = action.get("resources") or {}
@@ -329,24 +330,19 @@ class ActionRunner:
                 timed_out = True
 
             if ok:
-                self.db.table("optimization_actions").update({
-                    "status": "completed",
-                    "verified_at": now.isoformat(),
-                    "post_state": {"state": observed, "verified": True},
-                }).eq("id", action["id"]).eq("status", "executing").execute()
-                if action_type in VERIFY_TARGETS and resource.get("id"):
-                    self.db.table("resources").update({"state": observed}).eq("id", resource["id"]).execute()
-                self.audit.log_action(
-                    event_type="action_verified",
-                    actor="SYSTEM",
-                    resource_id=resource.get("id"),
-                    action_id=action["id"],
-                    aws_api_call=action_type,
-                    response_status="completed",
-                    message=f"Verified target state: {observed}",
-                )
-                self._after_success(action)
-                verified += 1
+                try:
+                    done = self._complete_verified(action, observed, resource)
+                except Exception:
+                    # Nothing was written: the action stays `executing` and is
+                    # retried next cycle. Keep verifying the others, then fail
+                    # the job so a persistent error alerts instead of
+                    # stranding actions in `executing`.
+                    logger.exception("Could not record verification of %s; retrying next cycle", action["id"])
+                    metrics.inc("cloudsentry_actions_total", action_type=action_type, result="verify_record_error")
+                    unrecorded += 1
+                    continue
+                if done:
+                    verified += 1
             elif timed_out:
                 self.db.table("optimization_actions").update({
                     "status": "failed",
@@ -364,21 +360,26 @@ class ActionRunner:
                     response_status="failed",
                     message=f"Verification did not reach target state within {VERIFY_TIMEOUT_SECONDS}s (observed={observed})",
                 )
+        if unrecorded:
+            raise RuntimeError(f"{unrecorded} verification(s) could not be recorded; {verified} recorded")
         return verified
 
-    def _after_success(self, action: dict) -> None:
-        if action["action_type"] in REVERSIBLE or action["action_type"] == "apply_tags":
-            self._resolve_anomaly(action)
-            return
-        # A completed rollback marks the original forward action as rolled back.
-        original = (
-            self.db.table("optimization_actions")
-            .select("id")
-            .eq("rollback_action_id", action["id"])
-            .execute()
-        )
-        for row in original.data or []:
-            self.db.table("optimization_actions").update({"status": "rolled_back"}).eq("id", row["id"]).execute()
+    def _complete_verified(self, action: dict, observed, resource: dict) -> bool:
+        """Record a verified action in one transaction (migration 014): mark it
+        completed, sync the resource state, audit it, then resolve its anomaly
+        (forward action) or mark the original rolled back (rollback action).
+        False when the action was no longer `executing`; nothing is written."""
+        action_type = action["action_type"]
+        res = self.db.rpc("complete_verified_action", {
+            "p_action_id": action["id"],
+            "p_observed": observed,
+            "p_resource_state": observed if action_type in VERIFY_TARGETS and resource.get("id") else None,
+            # Forward actions are the REVERSIBLE keys; anything else verified
+            # here is the reverse of one.
+            "p_is_rollback": action_type not in REVERSIBLE,
+            "p_message": f"Verified target state: {observed}",
+        }).execute()
+        return bool(res.data)
 
     def _resolve_anomaly(self, action: dict) -> None:
         anomaly_id = action.get("anomaly_id")

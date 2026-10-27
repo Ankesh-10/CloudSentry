@@ -155,6 +155,70 @@ def test_stop_verify_rollback_cycle(aws, fake_db):
     assert runner.rollback_action("a1", "USER:op") is False
 
 
+def _verified_rows(fake_db, aid="a1"):
+    return [l for l in fake_db.rows("audit_logs") if l["event_type"] == "action_verified" and l.get("action_id") == aid]
+
+
+def test_verify_success_is_all_or_nothing(aws, fake_db):
+    iid = _instance()
+    _seed(fake_db, iid)
+    _live()
+    runner = ActionRunner()
+    assert runner.execute_action("a1") is True
+
+    fake_db.fail_rpcs["complete_verified_action"] = lambda p: True
+    # The job must fail loudly (job_runs, alert), not report success.
+    with pytest.raises(RuntimeError, match="could not be recorded"):
+        runner.verify_pending()
+    assert _action(fake_db)["status"] == "executing"
+    assert fake_db.rows("anomalies")[0]["status"] == "active"
+    assert fake_db.rows("resources")[0]["state"] == "running"
+    assert _verified_rows(fake_db) == []
+
+    fake_db.fail_rpcs.clear()
+    assert runner.verify_pending() == 1  # retried on the next cycle
+    assert _action(fake_db)["status"] == "completed"
+    assert fake_db.rows("anomalies")[0]["status"] == "resolved"
+    assert len(_verified_rows(fake_db)) == 1
+
+
+def test_verify_success_skips_action_that_left_executing(aws, fake_db, monkeypatch):
+    iid = _instance()
+    _seed(fake_db, iid)
+    _live()
+    runner = ActionRunner()
+    assert runner.execute_action("a1") is True
+
+    def raced(pid):  # e.g. the stale-claim sweep on another replica wins
+        _action(fake_db)["status"] = "failed"
+        return "stopped"
+    monkeypatch.setattr(runner.cloud, "get_instance_state", raced)
+    assert runner.verify_pending() == 0
+    assert _action(fake_db)["status"] == "failed"
+    assert fake_db.rows("anomalies")[0]["status"] == "active"
+    assert _verified_rows(fake_db) == []
+
+
+def test_rpc_failure_does_not_block_other_verifications(aws, fake_db):
+    _seed(fake_db, _instance())
+    fake_db.rows("resources").append({"id": "r2", "provider_id": _instance(), "resource_type": "ec2", "state": "running",
+                                      "tags": {}, "protected": False, "metadata": {}})
+    fake_db.rows("anomalies").append({"id": "an2", "resource_id": "r2", "anomaly_type": "idle_compute", "status": "active"})
+    fake_db.rows("optimization_actions").append({
+        "id": "a2", "anomaly_id": "an2", "resource_id": "r2", "action_type": "stop_ec2", "risk_level": "MEDIUM",
+        "status": "pending", "requires_approval": False, "dry_run": True, "created_at": NOW.isoformat()})
+    _live()
+    runner = ActionRunner()
+    assert runner.execute_action("a1") is True
+    assert runner.execute_action("a2") is True
+
+    fake_db.fail_rpcs["complete_verified_action"] = lambda p: p["p_action_id"] == "a1"
+    with pytest.raises(RuntimeError, match="1 verification"):
+        runner.verify_pending()
+    assert _action(fake_db, "a1")["status"] == "executing"
+    assert _action(fake_db, "a2")["status"] == "completed"
+
+
 def test_rollback_of_dry_run_action_stays_dry(aws, fake_db):
     iid = _instance()
     _seed(fake_db, iid)

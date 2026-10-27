@@ -4,10 +4,11 @@ Implements the subset of PostgREST semantics the backend uses: filters actually
 filter, updates only touch matching rows, upserts honour on_conflict, the
 `resources(*)` embed is resolved from the foreign key, and the partial unique
 indexes from migration 007 are enforced so race-guard code paths are exercised.
+RPCs are emulated in Python: `complete_verified_action` mirrors migration 014.
 """
 import copy
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class FakeAPIError(Exception):
@@ -210,14 +211,73 @@ class FakeQuery:
         return _Result(out, count=total if self.want_count else None)
 
 
+def _complete_verified_action(db, p) -> bool:
+    """Python twin of migration 014's function: same steps, same guards. The
+    caller runs it on scratch copies, so a raise leaves nothing applied."""
+    action = next((a for a in db.rows("optimization_actions")
+                   if a["id"] == p["p_action_id"] and a.get("status") == "executing"), None)
+    if action is None:
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    action.update({"status": "completed", "verified_at": now,
+                   "post_state": {"state": copy.deepcopy(p["p_observed"]), "verified": True}})
+    resource_id = action.get("resource_id")
+    if p["p_resource_state"] is not None and resource_id is not None:
+        for r in db.rows("resources"):
+            if r["id"] == resource_id:
+                r["state"] = p["p_resource_state"]
+    db.rows("audit_logs").append({
+        "id": str(uuid.uuid4()), "event_type": "action_verified", "actor": "SYSTEM",
+        "resource_id": resource_id, "action_id": p["p_action_id"], "aws_api_call": action.get("action_type"),
+        "response_status": "completed", "message": p["p_message"], "created_at": now})
+    if p["p_is_rollback"]:
+        for a in db.rows("optimization_actions"):
+            if a.get("rollback_action_id") == p["p_action_id"]:
+                a["status"] = "rolled_back"
+    elif action.get("anomaly_id") is not None:
+        for n in db.rows("anomalies"):
+            if n["id"] == action["anomaly_id"] and n.get("status") == "active":
+                n.update({"status": "resolved", "resolved_at": now})
+    return True
+
+
+RPCS = {"complete_verified_action": _complete_verified_action}
+
+
+class _RpcQuery:
+    def __init__(self, db, fn, params):
+        self.db, self.fn, self.params = db, fn, params
+
+    def execute(self):
+        self.db.calls.append(("rpc", self.fn))
+        fail = self.db.fail_rpcs.get(self.fn)
+        if fail and fail(self.params):
+            raise FakeAPIError(f"simulated failure in rpc {self.fn}")
+        if self.fn not in RPCS:
+            raise NotImplementedError(self.fn)
+        # One transaction: snapshot first, restore it if the function raises.
+        snapshot = copy.deepcopy(self.db.tables)
+        try:
+            result = RPCS[self.fn](self.db, self.params)
+        except Exception:
+            self.db.tables = snapshot
+            raise
+        return _Result(result)
+
+
 class FakeSupabase:
     def __init__(self, tables=None):
         self.tables = {k: [copy.deepcopy(r) for r in v] for k, v in (tables or {}).items()}
         self.calls = []
         self.fail_tables = {}
+        # rpc name -> predicate(params); a true result raises before any write.
+        self.fail_rpcs = {}
 
     def table(self, name):
         return FakeQuery(self, name)
+
+    def rpc(self, fn, params):
+        return _RpcQuery(self, fn, params)
 
     def rows(self, name):
         return self.tables.setdefault(name, [])
