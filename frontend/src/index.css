@@ -1,0 +1,341 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/geist-mono';
+@import '@fontsource-variable/newsreader';
+
+/* ---------------------------------------------------------------------------
+   CloudSentry — utilitarian minimalism.
+   Warm monochrome canvas, white cards on 1px hairlines, editorial serif for
+   page titles, Geist for everything else. Colour is scarce: muted pastels for
+   status, and two validated series hues in charts. Status is never colour
+   alone — every tone ships with a word.
+   Light is default; dark applies via the OS unless data-theme is set.
+--------------------------------------------------------------------------- */
+:root {
+  color-scheme: light;
+  --page: #f7f6f3;          /* warm bone canvas */
+  --surface: #ffffff;       /* cards */
+  --subtle: #f3f2ef;        /* hover wash, wells */
+  --line: #eaeaea;          /* every border and divider */
+  --rule: #eaeaea;
+  --line-strong: #d9d8d4;
+  --field: #8f8e8a;         /* input edges: ≥3:1 on surface (WCAG 1.4.11) */
+  --fg: #111111;
+  --fg-2: #2f3437;
+  --muted: #6b6a67;         /* ≥4.5:1 on page, surface and subtle */
+  --primary: #111111;       /* solid CTA */
+  --primary-hover: #333333;
+  --on-primary: #ffffff;
+  --focus: #1f6c9f;
+
+  /* muted pastels: tinted background + readable text */
+  --accent: #9f2f2d;        /* danger / critical text */
+  --accent-soft: #fdebec;
+  --info: #1f6c9f;
+  --info-soft: #e1f3fe;
+  --success: #346538;
+  --success-soft: #edf3ec;
+  --warn: #956400;
+  --warn-soft: #fbf3db;
+  --signal: #346538;        /* the "online" dot */
+  --rehearsal: #5b4a9e;     /* dry run: logged, nothing changes */
+  --rehearsal-soft: #efecf8;
+
+  /* charts (validated: dataviz validate_palette.js, surface #ffffff) */
+  --chart-grid: #efeeea;
+  --chart-axis: #d9d8d4;
+  --series-1: #2a78d6;      /* blue: spend, potential savings */
+  --series-2: #1baf7a;      /* aqua: realized savings (sub-3:1 → legend + end labels) */
+  --series-prev: #b9b8b3;   /* comparison period, neutral */
+  --sev-high: #9f2f2d;      /* ordinal red ramp, high → low */
+  --sev-med: #c9605b;
+  --sev-low: #d4a19e;       /* desaturated: low recedes */
+
+  --shadow-hover: 0 2px 8px rgb(0 0 0 / 0.04);
+  --shadow-pop: 0 8px 28px rgb(0 0 0 / 0.045), 0 0 0 1px rgb(0 0 0 / 0.02);
+  --scrim: rgb(17 17 17 / 0.18);
+  --glow: rgb(214 170 110 / 0.05);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme='light'])) {
+    color-scheme: dark;
+    --page: #191919;
+    --surface: #202020;
+    --subtle: #262626;
+    --line: #2f2f2f;
+    --rule: #2f2f2f;
+    --line-strong: #3a3a3a;
+    --field: #706f6b;
+    --fg: #ecece9;
+    --fg-2: #c9c8c4;
+    --muted: #8f8e8a;
+    --primary: #ecece9;
+    --primary-hover: #d4d3cf;
+    --on-primary: #191919;
+    --focus: #7fbbe9;
+    --accent: #f19c99;
+    --accent-soft: #3a2323;
+    --info: #7fbbe9;
+    --info-soft: #1e3140;
+    --success: #8bc48f;
+    --success-soft: #213022;
+    --warn: #e2b75b;
+    --warn-soft: #3a311e;
+    --signal: #8bc48f;
+    --rehearsal: #b9aaf0;
+    --rehearsal-soft: #2a2540;
+    --chart-grid: #2a2a29;
+    --chart-axis: #3a3a38;
+    --series-1: #3987e5;
+    --series-2: #199e70;
+    --series-prev: #5a5955;
+    --sev-high: #f0807a;
+    --sev-med: #b8625d;
+    --sev-low: #8a5f5c;
+    --shadow-hover: 0 2px 8px rgb(0 0 0 / 0.25);
+    --shadow-pop: 0 8px 28px rgb(0 0 0 / 0.35);
+    --scrim: rgb(0 0 0 / 0.5);
+    --glow: rgb(214 170 110 / 0.025);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --page: #191919;
+  --surface: #202020;
+  --subtle: #262626;
+  --line: #2f2f2f;
+  --rule: #2f2f2f;
+  --line-strong: #3a3a3a;
+  --field: #706f6b;
+  --fg: #ecece9;
+  --fg-2: #c9c8c4;
+  --muted: #8f8e8a;
+  --primary: #ecece9;
+  --primary-hover: #d4d3cf;
+  --on-primary: #191919;
+  --focus: #7fbbe9;
+  --accent: #f19c99;
+  --accent-soft: #3a2323;
+  --info: #7fbbe9;
+  --info-soft: #1e3140;
+  --success: #8bc48f;
+  --success-soft: #213022;
+  --warn: #e2b75b;
+  --warn-soft: #3a311e;
+  --signal: #8bc48f;
+  --rehearsal: #b9aaf0;
+  --rehearsal-soft: #2a2540;
+  --chart-grid: #2a2a29;
+  --chart-axis: #3a3a38;
+  --series-1: #3987e5;
+  --series-2: #199e70;
+  --series-prev: #5a5955;
+  --sev-high: #f0807a;
+  --sev-med: #b8625d;
+  --sev-low: #8a5f5c;
+  --shadow-hover: 0 2px 8px rgb(0 0 0 / 0.25);
+  --shadow-pop: 0 8px 28px rgb(0 0 0 / 0.35);
+  --scrim: rgb(0 0 0 / 0.5);
+  --glow: rgb(214 170 110 / 0.025);
+}
+
+/* Tailwind's dark: variant follows the same rule as the tokens. */
+@custom-variant dark {
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-theme='light']) *) {
+      @slot;
+    }
+  }
+  &:where(:root[data-theme='dark'] *) {
+    @slot;
+  }
+}
+
+@theme inline {
+  --font-sans: 'Geist Variable', 'SF Pro Display', 'Helvetica Neue', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Geist Mono Variable', 'SF Mono', ui-monospace, 'Cascadia Code', Menlo, Consolas, monospace;
+  --font-serif: 'Newsreader Variable', 'Lyon Text', Georgia, serif;
+
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-subtle: var(--subtle);
+  --color-line: var(--line);
+  --color-rule: var(--rule);
+  --color-line-strong: var(--line-strong);
+  --color-field: var(--field);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-muted: var(--muted);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-on-primary: var(--on-primary);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-signal: var(--signal);
+  --color-rehearsal: var(--rehearsal);
+  --color-rehearsal-soft: var(--rehearsal-soft);
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-series-prev: var(--series-prev);
+  --color-sev-high: var(--sev-high);
+  --color-sev-med: var(--sev-med);
+  --color-sev-low: var(--sev-low);
+
+  --shadow-hover: var(--shadow-hover);
+  --shadow-pop: var(--shadow-pop);
+}
+
+body {
+  @apply bg-page font-sans text-[14px] leading-[1.6] text-fg-2 antialiased;
+}
+
+/* One warm light spot, fixed behind everything, drifting very slowly. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: -20vmax;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(40vmax 30vmax at 75% 10%, var(--glow), transparent 70%),
+    radial-gradient(30vmax 30vmax at 10% 90%, var(--glow), transparent 70%);
+}
+@media (prefers-reduced-motion: no-preference) {
+  body::before {
+    animation: drift 40s ease-in-out infinite alternate;
+  }
+}
+@media (forced-colors: active), print {
+  body::before {
+    display: none;
+  }
+}
+
+::selection {
+  background: var(--info-soft);
+  color: var(--fg);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Base layer, so utilities like `hidden sm:inline-flex` on a kbd still win. */
+@layer base {
+  kbd {
+    @apply inline-flex items-center rounded-[4px] border border-line bg-page px-1.5 font-mono text-[11px] leading-[1.6] whitespace-nowrap text-muted;
+  }
+}
+
+/* ---------- type ---------------------------------------------------------------- */
+
+/* Editorial serif for page titles and dialog headings. */
+@utility display {
+  font-family: var(--font-serif);
+  font-weight: 450;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+/* UI label: small, medium weight, sentence case. */
+@utility label {
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.4;
+}
+
+/* Small uppercase kicker for table heads, tags and section eyebrows. */
+@utility eyebrow {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  line-height: 1.3;
+}
+
+/* Big figures: sans, tight, proportional digits (dataviz: hero stays sans). */
+@utility figure {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  letter-spacing: -0.035em;
+  line-height: 1;
+}
+
+@utility input {
+  @apply h-9 rounded-md border border-field bg-surface px-3 text-[13.5px] text-fg transition-colors placeholder:text-muted hover:border-fg-2 focus:border-fg focus:outline-none;
+}
+
+@utility th {
+  @apply eyebrow h-10 border-b border-line px-4 text-left whitespace-nowrap text-muted first:pl-6 last:pr-6;
+}
+
+@utility td {
+  @apply h-12 px-4 align-middle text-[13.5px] first:pl-6 last:pr-6;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- motion ---------------------------------------------------------------- */
+
+/* Scroll entry: `reveal` blocks start hidden and settle in when observed. Only
+   with motion allowed; otherwise they render at rest. */
+@media (prefers-reduced-motion: no-preference) {
+  .reveal:not([data-shown]) {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  .reveal {
+    transition:
+      opacity 600ms cubic-bezier(0.16, 1, 0.3, 1),
+      transform 600ms cubic-bezier(0.16, 1, 0.3, 1),
+      box-shadow 200ms ease,
+      border-color 200ms ease;
+    transition-delay: calc(var(--index, 0) * 80ms), calc(var(--index, 0) * 80ms), 0ms, 0ms;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
+}
+
+@keyframes drift {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(-4vmax, 3vmax, 0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.99); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes slide-in {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@keyframes shimmer {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
