@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     HISTORY_RETENTION_DAYS: int = 365  # finished actions, closed anomalies
     # Enabling automation or disabling dry-run needs a second operator to confirm.
     REQUIRE_TWO_PERSON_CONFIG: bool = True
+    # Who may confirm such a change. "two_person": only a different operator.
+    # "solo_delay": also the requester, but only after a 15-minute wait (for a
+    # deployment with a single operator). Env-only: switching it is a loosening.
+    TWO_PERSON_MODE: Literal["two_person", "solo_delay"] = "two_person"
 
     model_config = SettingsConfigDict(
         env_file=".env",

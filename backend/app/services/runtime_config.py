@@ -29,6 +29,33 @@ MAX_VALUES: dict[str, float] = {
 # Unsafe-direction changes wait for a second operator; the request expires.
 PENDING_PREFIX = "PENDING:"
 PENDING_TTL = timedelta(hours=1)
+# TWO_PERSON_MODE=solo_delay: the requester may confirm their own request
+# after this long. The wait stands in for the second person.
+SOLO_CONFIRM_DELAY = timedelta(minutes=15)
+
+
+def self_confirm_at(requested_at: datetime) -> Optional[datetime]:
+    """When the requester may confirm their own request, or None if never."""
+    return requested_at + SOLO_CONFIRM_DELAY if settings.TWO_PERSON_MODE == "solo_delay" else None
+
+
+def check_confirmer(pending: dict, actor: str) -> dict[str, Any]:
+    """Raise PermissionError if `actor` may not confirm `pending` (yet).
+
+    A different operator always may. The requester may only in solo_delay
+    mode, once SOLO_CONFIRM_DELAY has passed. Returns extra audit params:
+    empty for a second operator, the wait for a self-confirmation."""
+    if pending.get("requested_by") != actor:
+        return {}
+    requested_at = datetime.fromisoformat(pending["requested_at"])
+    at = self_confirm_at(requested_at)
+    if at is None:
+        raise PermissionError("A different operator must confirm this change")
+    now = datetime.now(timezone.utc)
+    if now < at:
+        raise PermissionError(f"You can confirm your own request from {at:%H:%M} UTC, "
+                              "or a different operator can confirm it now")
+    return {"self_confirmed": True, "waited_minutes": int((now - requested_at).total_seconds() // 60)}
 
 _cache: dict[str, Any] = {}
 
@@ -199,8 +226,9 @@ def request_change(key: str, value: Any, actor: str) -> dict[str, Any]:
 
     Returns {"status": "applied", "value": ...} or
     {"status": "pending_confirmation", ...}. Raises ValueError on bad input,
-    PermissionError when the requester tries to confirm their own request, and
-    any database error unchanged (the change is then not applied)."""
+    PermissionError when the requester may not confirm their own request (see
+    check_confirmer), and any database error unchanged (the change is then not
+    applied)."""
     if key not in KNOWN_KEYS:
         raise ValueError(f"Unknown configuration key: {key}")
     parsed = _parse(key, value)
@@ -219,14 +247,15 @@ def request_change(key: str, value: Any, actor: str) -> dict[str, Any]:
                                  "requested_at": now.isoformat()}),
             "updated_at": now.isoformat(),
         }, on_conflict="key").execute()
+        confirm_at = self_confirm_at(now)
         return {"status": "pending_confirmation", "value": parsed, "requested_by": actor,
-                "expires_at": (now + PENDING_TTL).isoformat()}
-    if pending.get("requested_by") == actor:
-        raise PermissionError("A different operator must confirm this change")
+                "expires_at": (now + PENDING_TTL).isoformat(),
+                "confirmable_at": confirm_at.isoformat() if confirm_at else None}
+    extra = check_confirmer(pending, actor)
     set_flag(key, parsed, persist=True)
     _clear_pending(db, key)
     return {"status": "applied", "value": parsed, "requested_by": pending.get("requested_by"),
-            "confirmed_by": actor}
+            "confirmed_by": actor, **extra}
 
 
 def list_pending() -> list[dict[str, Any]]:
@@ -247,9 +276,12 @@ def list_pending() -> list[dict[str, Any]]:
         except (TypeError, ValueError, KeyError):
             continue
         expires_at = requested_at + PENDING_TTL
+        confirm_at = self_confirm_at(requested_at)
         out.append({"key": key[len(PENDING_PREFIX):], "value": pending.get("value"),
                     "requested_by": pending.get("requested_by"), "requested_at": requested_at.isoformat(),
-                    "expires_at": expires_at.isoformat(), "expired": now > expires_at})
+                    "expires_at": expires_at.isoformat(), "expired": now > expires_at,
+                    # When the requester may confirm it themselves (null: only another operator).
+                    "confirmable_at": confirm_at.isoformat() if confirm_at else None})
     return sorted(out, key=lambda p: p["requested_at"], reverse=True)
 
 

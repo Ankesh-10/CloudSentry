@@ -127,6 +127,9 @@ async def collect_health(detailed: bool = False) -> dict:
         "automation": {
             "enabled": runtime_config.automation_enabled(),
             "dry_run": runtime_config.dry_run_mode(),
+            # Who confirms a loosening change: "off" (nobody needs to), a
+            # different operator, or also the requester after a wait.
+            "two_person": settings.TWO_PERSON_MODE if settings.REQUIRE_TWO_PERSON_CONFIG else "off",
         },
         "scheduler": {"running": scheduler.scheduler.running, "leader": scheduler.is_leader()},
         "jobs": await run_in_threadpool(job_status.snapshot_all),

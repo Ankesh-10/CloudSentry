@@ -106,6 +106,16 @@ def approvals_needed(items: list[dict]) -> Optional[bool]:
                 + "\n".join(lines))
 
 
+def change_requested(what: str, actor: str, pending: dict) -> bool:
+    """A change that loosens a limit is waiting for confirmation. In solo mode
+    this tells the lone operator when they can confirm it themselves.
+    pending: {"expires_at", "confirmable_at"} as ISO strings."""
+    when = (f"You can confirm it yourself from {pending['confirmable_at'][11:16]} UTC, "
+            if pending.get("confirmable_at") else "A different operator must confirm it ")
+    return send(f"pending:{what}:{pending.get('expires_at')}",
+                f":hourglass: {actor} requested: {what}. {when}before {pending['expires_at'][11:16]} UTC.")
+
+
 def emergency_stop(actor: str, persisted: bool) -> bool:
     note = "" if persisted else " (NOT persisted to the database: other replicas may still be running!)"
     return send(f"estop:{time.time()}", f":octagonal_sign: Emergency stop by {actor}{note}")

@@ -76,7 +76,7 @@ Every `/api/v1/*` route (except `/health` and `/health/live`) needs `Authorizati
 * Plain Supabase sign-up grants **nothing**; anonymous sessions are always rejected. `REQUIRE_VIEWER_ROLE=false` lets any signed-in user read (only if sign-up is closed).
 * `app_metadata` is settable only with the service-role key; `user_metadata` never grants roles.
 * Direct Supabase reads/Realtime (e.g. a frontend) are gated by migration 009 on `app_metadata.cloudsentry_role`; the `*_USER_IDS` lists apply to the API only.
-* **Two-person rule:** any change that lets the agent do more returns `202 pending_confirmation`, and a *different* operator must repeat the same change within an hour: enabling `GLOBAL_AUTOMATION_ENABLED`, disabling `DRY_RUN_MODE`, raising a cap (`MAX_ACTIONS_PER_DAY`, budgets, CloudWatch caps) or shortening `ACTION_COOLDOWN_MINUTES`, enabling a policy or removing its approval step, and unprotecting a resource. Tightening is always immediate. `GET /system/config/pending` lists open requests; any operator can cancel one. An emergency stop cancels a pending enable.
+* **Two-person rule:** any change that lets the agent do more returns `202 pending_confirmation`, and a *different* operator must repeat the same change within an hour: enabling `GLOBAL_AUTOMATION_ENABLED`, disabling `DRY_RUN_MODE`, raising a cap (`MAX_ACTIONS_PER_DAY`, budgets, CloudWatch caps) or shortening `ACTION_COOLDOWN_MINUTES`, enabling a policy or removing its approval step, and unprotecting a resource. Tightening is always immediate. `GET /system/config/pending` lists open requests; any operator can cancel one. An emergency stop cancels a pending enable. **Solo operators:** with `TWO_PERSON_MODE=solo_delay` the requester may confirm their own request after a 15-minute wait (still within the hour); a different operator can still confirm at once, the audit row records `self_confirmed` and the wait, and the alert webhook says when confirming opens.
 * **Audit:** every approval/rejection, proposal (`action_proposed`), policy toggle, protection change and cancellation is written to `audit_logs` *before* the change; if the audit write fails, the change is refused (503).
 * **Never stopped automatically:** instances owned by an Auto Scaling group, EKS node group, Karpenter or an EC2/Spot fleet (stopping one makes the group replace it).
 
@@ -122,6 +122,7 @@ All settings are environment variables (see `.env.example` for the full, comment
 | `MAX_DAILY_SPEND_USD` / `MAX_MONTHLY_BUDGET_USD` | `2` / `10` | Budget gate for spend-raising actions |
 | `APPROVAL_TTL_HOURS` | `72` | Older proposals/approvals expire instead of executing |
 | `REQUIRE_TWO_PERSON_CONFIG` | `true` | Second operator confirms unsafe config changes |
+| `TWO_PERSON_MODE` | `two_person` | `solo_delay`: the requester may confirm their own change after 15 minutes (single-operator setups) |
 | `OPERATOR_USER_IDS` / `VIEWER_USER_IDS` | — | Role allowlists (comma-separated Supabase user ids) |
 | `AWS_REGIONS` | default region | Extra regions to discover/monitor (IAM policy must allow them) |
 | `RATE_LIMIT_PER_MINUTE` | `300` | Per-client-IP limit, per process |

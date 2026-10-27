@@ -63,13 +63,16 @@ def _set(key: str, value: str, user: dict):
             event_type="config_change_requested",
             actor=actor,
             request_params={"key": key, "value": str(parsed)},
-            message=f"{key}={parsed} requested; awaiting a second operator",
+            message=f"{key}={parsed} requested; awaiting confirmation",
         )
+        alerts.change_requested(f"{key}={parsed}", actor, result)
         return JSONResponse(status_code=202, content={"status": "pending_confirmation", "key": key,
-                                                      "value": parsed, "expires_at": result["expires_at"]})
+                                                      "value": parsed, "expires_at": result["expires_at"],
+                                                      "confirmable_at": result["confirmable_at"]})
     params = {"key": key, "value": str(parsed)}
-    if result.get("requested_by"):
-        params["requested_by"] = result["requested_by"]
+    for extra in ("requested_by", "self_confirmed", "waited_minutes"):
+        if result.get(extra) is not None:
+            params[extra] = result[extra]
     AuditLogger().log_action(
         event_type="config_changed",
         actor=actor,

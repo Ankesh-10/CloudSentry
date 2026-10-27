@@ -16,7 +16,7 @@ from backend.app.db.pagination import set_total
 from backend.app.db.supabase_client import get_supabase_client
 from backend.app.rate_limit import rate_limit
 from backend.app.schemas.models import Resource
-from backend.app.services import two_person
+from backend.app.services import alerts, two_person
 from backend.app.services.audit_logger import AuditLogger, AuditWriteError
 from backend.app.services.discovery import DiscoveryError, DiscoveryService
 
@@ -112,13 +112,16 @@ def set_protection(resource_id: UUID, payload: ProtectionUpdate, user: dict = De
         pending = two_person.live_request(pending_key, value)
         if pending is None:
             audit("resource_protection_change_requested",
-                  f"Unprotect {current.get('provider_id')} requested; awaiting a second operator",
+                  f"Unprotect {current.get('provider_id')} requested; awaiting confirmation",
                   "change not requested")
-            expires_at = two_person.record_request(pending_key, value, actor)
+            times = two_person.record_request(pending_key, value, actor)
+            alerts.change_requested(f"unprotect {current.get('provider_id')}", actor, times)
             return JSONResponse(status_code=202, content={"status": "pending_confirmation", "resource_id": rid,
-                                                          "protected": value, "expires_at": expires_at})
-        if pending.get("requested_by") == actor:
-            raise HTTPException(status_code=409, detail="A different operator must confirm this change")
+                                                          "protected": value, **times})
+        try:
+            params.update(two_person.check_confirmer(pending, actor))
+        except PermissionError as e:
+            raise HTTPException(status_code=409, detail=str(e))
         params["requested_by"] = pending.get("requested_by")
 
     audit("resource_protection_changed", f"{current.get('provider_id')} protected={value}", "change not applied")
