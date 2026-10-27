@@ -166,11 +166,15 @@ jobs:
           async def main():
               conn = await asyncpg.connect(os.environ["DATABASE_URL"])
               old = "NOW() - interval '2 hours'"
+              # resources.account_id is NOT NULL (migration 009).
+              acct = await conn.fetchval(
+                  "INSERT INTO cloud_accounts (provider, account_id, region) "
+                  "VALUES ('aws', '000000000000', 'us-east-1') RETURNING id")
               await conn.execute(
-                  "INSERT INTO resources (provider_id, resource_type, region, state, first_seen) VALUES "
-                  f"('i-ci-silent', 'ec2', 'us-east-1', 'running', {old}), "
-                  f"('i-ci-busy', 'ec2', 'us-east-1', 'running', {old}), "
-                  f"('fn-ci', 'lambda', 'us-east-1', 'available', {old})")
+                  "INSERT INTO resources (account_id, provider_id, resource_type, region, state, first_seen) VALUES "
+                  f"($1, 'i-ci-silent', 'ec2', 'us-east-1', 'running', {old}), "
+                  f"($1, 'i-ci-busy', 'ec2', 'us-east-1', 'running', {old}), "
+                  f"($1, 'fn-ci', 'lambda', 'us-east-1', 'available', {old})", acct)
               await conn.execute(
                   "INSERT INTO resource_metrics (time, resource_id, metric_name, value) "
                   "SELECT NOW(), id, 'CPUUtilization', 1 FROM resources WHERE provider_id = 'i-ci-busy'")
