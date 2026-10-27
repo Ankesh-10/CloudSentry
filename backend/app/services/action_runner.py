@@ -344,22 +344,19 @@ class ActionRunner:
                 if done:
                     verified += 1
             elif timed_out:
-                self.db.table("optimization_actions").update({
-                    "status": "failed",
-                    "post_state": {"state": observed, "verified": False, "timeout": True},
-                }).eq("id", action["id"]).eq("status", "executing").execute()
-                self._release_rollback_link(action["id"])
-                metrics.inc("cloudsentry_actions_total", action_type=action_type, result="verify_timeout")
-                alerts.verification_timeout(action, resource, observed)
-                self.audit.log_action(
-                    event_type="action_failed",
-                    actor="SYSTEM",
-                    resource_id=resource.get("id"),
-                    action_id=action["id"],
-                    aws_api_call=action_type,
-                    response_status="failed",
-                    message=f"Verification did not reach target state within {VERIFY_TIMEOUT_SECONDS}s (observed={observed})",
-                )
+                try:
+                    failed = self._fail_timed_out(action, observed)
+                except Exception:
+                    # As above: nothing was written, retried next cycle.
+                    logger.exception("Could not record verification timeout of %s; retrying next cycle", action["id"])
+                    metrics.inc("cloudsentry_actions_total", action_type=action_type, result="verify_record_error")
+                    unrecorded += 1
+                    continue
+                # Not failed: another replica's verify pass already completed
+                # or failed it, and recorded that itself.
+                if failed:
+                    metrics.inc("cloudsentry_actions_total", action_type=action_type, result="verify_timeout")
+                    alerts.verification_timeout(action, resource, observed)
         if unrecorded:
             raise RuntimeError(f"{unrecorded} verification(s) could not be recorded; {verified} recorded")
         return verified
@@ -378,6 +375,17 @@ class ActionRunner:
             # here is the reverse of one.
             "p_is_rollback": action_type not in REVERSIBLE,
             "p_message": f"Verified target state: {observed}",
+        }).execute()
+        return bool(res.data)
+
+    def _fail_timed_out(self, action: dict, observed) -> bool:
+        """Record a verification timeout in one transaction (migration 015):
+        mark the action failed, release its rollback link, audit it. False
+        when the action was no longer `executing`; nothing is written."""
+        res = self.db.rpc("fail_timed_out_action", {
+            "p_action_id": action["id"],
+            "p_observed": observed,
+            "p_message": f"Verification did not reach target state within {VERIFY_TIMEOUT_SECONDS}s (observed={observed})",
         }).execute()
         return bool(res.data)
 

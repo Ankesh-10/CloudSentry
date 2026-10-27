@@ -107,3 +107,23 @@ def test_migration_014_function_is_service_role_only():
     for role in ("PUBLIC", "anon", "authenticated"):
         assert re.search(rf"REVOKE ALL ON FUNCTION public\.complete_verified_action\([^)]*\) FROM {role}", sql), role
     assert re.search(r"GRANT EXECUTE ON FUNCTION public\.complete_verified_action\([^)]*\) TO service_role", sql)
+
+
+SQL_015 = "015_fail_timed_out_action.sql"
+
+
+def test_migration_015_defines_the_timeout_rpc_and_records_itself():
+    sql = _sql(SQL_015)
+    assert "CREATE OR REPLACE FUNCTION public.fail_timed_out_action(" in sql
+    assert "SET search_path = public" in sql
+    # The guard: a pass that lost the race writes nothing.
+    assert re.search(r"WHERE id = p_action_id AND status = 'executing'.*?IF NOT FOUND THEN\s+RETURN false;", sql, re.S)
+    assert "INSERT INTO schema_migrations (version) VALUES (15)" in sql
+    assert "NOTIFY pgrst, 'reload schema'" in sql
+
+
+def test_migration_015_function_is_service_role_only():
+    sql = _sql(SQL_015)
+    for role in ("PUBLIC", "anon", "authenticated"):
+        assert re.search(rf"REVOKE ALL ON FUNCTION public\.fail_timed_out_action\([^)]*\) FROM {role}", sql), role
+    assert re.search(r"GRANT EXECUTE ON FUNCTION public\.fail_timed_out_action\([^)]*\) TO service_role", sql)

@@ -1,9 +1,10 @@
-"""CI check: complete_verified_action (migration 014) on a real Postgres.
+"""CI check: the verify job's RPCs on a real Postgres --
+complete_verified_action (migration 014) and fail_timed_out_action (015).
 
 The pytest suite runs against an in-memory fake, so this is what proves the
 SQL itself: the forward and rollback paths, the "no longer executing" guard,
 all-or-nothing on a mid-function failure, and that end-user roles cannot call
-it. Seeds its own rows; run after scripts/apply_migrations.py.
+them. Seeds its own rows; run after scripts/apply_migrations.py.
 
     DATABASE_URL=postgresql://... python scripts/check_complete_verified_action.py
 """
@@ -15,6 +16,8 @@ import asyncpg
 
 SIG = "complete_verified_action(uuid,jsonb,text,boolean,text)"
 CALL = "SELECT complete_verified_action($1, $2::jsonb, $3, $4, $5)"
+TIMEOUT_SIG = "fail_timed_out_action(uuid,jsonb,text)"
+TIMEOUT_CALL = "SELECT fail_timed_out_action($1, $2::jsonb, $3)"
 
 
 ACCOUNT = {}
@@ -66,13 +69,23 @@ async def check_forward(conn):
     assert await _verified_rows(conn, act) == 1
 
 
-async def check_rollback(conn):
-    _, aid, original = await _seed(conn, "orig", status="completed")
+async def _seed_rollback(conn, tag: str):
+    _, aid, original = await _seed(conn, tag, status="completed")
     rollback = await conn.fetchval(
         "INSERT INTO optimization_actions (anomaly_id, resource_id, action_type, status, dry_run) "
         "SELECT anomaly_id, resource_id, 'start_ec2', 'executing', false FROM optimization_actions WHERE id = $1 "
         "RETURNING id", original)
     await conn.execute("UPDATE optimization_actions SET rollback_action_id = $1 WHERE id = $2", rollback, original)
+    return aid, original, rollback
+
+
+async def _failed_rows(conn, action_id) -> int:
+    return await conn.fetchval(
+        "SELECT COUNT(*) FROM audit_logs WHERE action_id = $1 AND event_type = 'action_failed'", action_id)
+
+
+async def check_rollback(conn):
+    aid, original, rollback = await _seed_rollback(conn, "orig")
     assert await conn.fetchval(CALL, rollback, json.dumps("running"), "running", True, "Verified target state: running") is True
     assert await conn.fetchval("SELECT status FROM optimization_actions WHERE id = $1", rollback) == "completed"
     assert await conn.fetchval("SELECT status FROM optimization_actions WHERE id = $1", original) == "rolled_back"
@@ -106,9 +119,43 @@ async def check_all_or_nothing(conn):
         pass
 
 
+async def check_timeout(conn):
+    rid, aid, act = await _seed(conn, "timeout")
+    assert await conn.fetchval(TIMEOUT_CALL, act, json.dumps("running"), "Verification timed out") is True
+    post = await conn.fetchval("SELECT post_state FROM optimization_actions WHERE id = $1", act)
+    assert json.loads(post) == {"state": "running", "verified": False, "timeout": True}, post
+    assert await conn.fetchval("SELECT status FROM optimization_actions WHERE id = $1", act) == "failed"
+    assert await conn.fetchval("SELECT state FROM resources WHERE id = $1", rid) == "running"
+    assert await conn.fetchval("SELECT status FROM anomalies WHERE id = $1", aid) == "active"
+    assert await _failed_rows(conn, act) == 1
+
+    # Second call: the action is no longer executing -> false, nothing written.
+    assert await conn.fetchval(TIMEOUT_CALL, act, json.dumps("running"), "again") is False
+    assert await _failed_rows(conn, act) == 1
+
+
+async def check_timeout_releases_rollback_link(conn):
+    _, original, rollback = await _seed_rollback(conn, "timeout-rb")
+    assert await conn.fetchval(TIMEOUT_CALL, rollback, json.dumps("pending"), "Verification timed out") is True
+    row = await conn.fetchrow("SELECT status, rollback_action_id FROM optimization_actions WHERE id = $1", original)
+    assert row["status"] == "completed" and row["rollback_action_id"] is None, row
+
+
+async def check_timeout_after_lost_race(conn):
+    # Another replica completed the rollback first: the timeout writes nothing.
+    _, original, rollback = await _seed_rollback(conn, "timeout-race")
+    assert await conn.fetchval(CALL, rollback, json.dumps("running"), "running", True, "Verified") is True
+    assert await conn.fetchval(TIMEOUT_CALL, rollback, json.dumps("pending"), "Verification timed out") is False
+    assert await conn.fetchval("SELECT status FROM optimization_actions WHERE id = $1", rollback) == "completed"
+    row = await conn.fetchrow("SELECT status, rollback_action_id FROM optimization_actions WHERE id = $1", original)
+    assert row["status"] == "rolled_back" and row["rollback_action_id"] == rollback, row
+    assert await _failed_rows(conn, rollback) == 0
+
+
 async def check_privileges(conn):
-    for role in ("anon", "authenticated"):
-        assert await conn.fetchval("SELECT has_function_privilege($1, $2, 'EXECUTE')", role, SIG) is False, role
+    for sig in (SIG, TIMEOUT_SIG):
+        for role in ("anon", "authenticated"):
+            assert await conn.fetchval("SELECT has_function_privilege($1, $2, 'EXECUTE')", role, sig) is False, (role, sig)
 
 
 async def main():
@@ -118,10 +165,13 @@ async def main():
         await check_forward(conn)
         await check_rollback(conn)
         await check_all_or_nothing(conn)
+        await check_timeout(conn)
+        await check_timeout_releases_rollback_link(conn)
+        await check_timeout_after_lost_race(conn)
         await check_privileges(conn)
     finally:
         await conn.close()
-    print("complete_verified_action: OK")
+    print("complete_verified_action, fail_timed_out_action: OK")
 
 
 if __name__ == "__main__":

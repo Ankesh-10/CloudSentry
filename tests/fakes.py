@@ -4,7 +4,8 @@ Implements the subset of PostgREST semantics the backend uses: filters actually
 filter, updates only touch matching rows, upserts honour on_conflict, the
 `resources(*)` embed is resolved from the foreign key, and the partial unique
 indexes from migration 007 are enforced so race-guard code paths are exercised.
-RPCs are emulated in Python: `complete_verified_action` mirrors migration 014.
+RPCs are emulated in Python: `complete_verified_action` mirrors migration 014,
+`fail_timed_out_action` migration 015.
 """
 import copy
 import uuid
@@ -241,7 +242,26 @@ def _complete_verified_action(db, p) -> bool:
     return True
 
 
-RPCS = {"complete_verified_action": _complete_verified_action}
+def _fail_timed_out_action(db, p) -> bool:
+    """Python twin of migration 015's function: same steps, same guards."""
+    action = next((a for a in db.rows("optimization_actions")
+                   if a["id"] == p["p_action_id"] and a.get("status") == "executing"), None)
+    if action is None:
+        return False
+    action.update({"status": "failed",
+                   "post_state": {"state": copy.deepcopy(p["p_observed"]), "verified": False, "timeout": True}})
+    for a in db.rows("optimization_actions"):
+        if a.get("rollback_action_id") == p["p_action_id"] and a.get("status") == "completed":
+            a["rollback_action_id"] = None
+    db.rows("audit_logs").append({
+        "id": str(uuid.uuid4()), "event_type": "action_failed", "actor": "SYSTEM",
+        "resource_id": action.get("resource_id"), "action_id": p["p_action_id"],
+        "aws_api_call": action.get("action_type"), "response_status": "failed", "message": p["p_message"],
+        "created_at": datetime.now(timezone.utc).isoformat()})
+    return True
+
+
+RPCS = {"complete_verified_action": _complete_verified_action, "fail_timed_out_action": _fail_timed_out_action}
 
 
 class _RpcQuery:

@@ -7,7 +7,7 @@ import pytest
 from moto import mock_aws
 
 from backend.app.config import settings
-from backend.app.services import runtime_config
+from backend.app.services import alerts, runtime_config
 from backend.app.services.action_runner import ActionRunner
 
 NOW = datetime.now(timezone.utc)
@@ -455,6 +455,64 @@ def test_rollback_verify_timeout_releases_link(aws, fake_db, monkeypatch):
     runner.verify_pending()
     assert _action(fake_db, rollback_id)["status"] == "failed"
     assert _action(fake_db).get("rollback_action_id") is None
+
+
+def _failed_rows(fake_db, aid):
+    return [l for l in fake_db.rows("audit_logs") if l["event_type"] == "action_failed" and l.get("action_id") == aid]
+
+
+def test_verify_timeout_skips_action_that_left_executing(aws, fake_db, monkeypatch):
+    """Another replica's verify pass completes the rollback while this one is
+    still observing it: this pass's timeout must not fail it, alert, audit a
+    failure that contradicts the `action_verified` row, or unlink it."""
+    iid, runner = _completed_stop(fake_db)
+    assert runner.rollback_action("a1", "USER:op") is True
+    rollback_id = _action(fake_db)["rollback_action_id"]
+    _action(fake_db, rollback_id)["executed_at"] = (NOW - timedelta(minutes=10)).isoformat()
+
+    def raced(pid):  # the other replica's verify pass wins first
+        assert fake_db.rpc("complete_verified_action", {
+            "p_action_id": rollback_id, "p_observed": "running", "p_resource_state": "running",
+            "p_is_rollback": True, "p_message": "Verified target state: running"}).execute().data is True
+        return "pending"  # this pass observed it mid-transition
+    monkeypatch.setattr(runner.cloud, "get_instance_state", raced)
+    timeouts = []
+    monkeypatch.setattr(alerts, "verification_timeout", lambda *a: timeouts.append(a))
+
+    assert runner.verify_pending() == 0
+    assert _action(fake_db, rollback_id)["status"] == "completed"
+    assert _action(fake_db)["status"] == "rolled_back"
+    assert _action(fake_db)["rollback_action_id"] == rollback_id
+    assert _failed_rows(fake_db, rollback_id) == []
+    assert len(_verified_rows(fake_db, rollback_id)) == 1
+    assert timeouts == []
+
+
+def test_verify_timeout_is_all_or_nothing(aws, fake_db, monkeypatch):
+    iid, runner = _completed_stop(fake_db)
+    assert runner.rollback_action("a1", "USER:op") is True
+    rollback_id = _action(fake_db)["rollback_action_id"]
+    _action(fake_db, rollback_id)["executed_at"] = (NOW - timedelta(minutes=10)).isoformat()
+    monkeypatch.setattr(runner.cloud, "get_instance_state", lambda pid: "pending")
+    timeouts = []
+    monkeypatch.setattr(alerts, "verification_timeout", lambda *a: timeouts.append(a))
+
+    fake_db.fail_rpcs["fail_timed_out_action"] = lambda p: True
+    with pytest.raises(RuntimeError, match="could not be recorded"):
+        runner.verify_pending()
+    assert _action(fake_db, rollback_id)["status"] == "executing"
+    assert _action(fake_db)["rollback_action_id"] == rollback_id
+    assert _failed_rows(fake_db, rollback_id) == []
+    assert timeouts == []
+
+    fake_db.fail_rpcs.clear()
+    assert runner.verify_pending() == 0  # retried on the next cycle
+    rollback = _action(fake_db, rollback_id)
+    assert rollback["status"] == "failed"
+    assert rollback["post_state"] == {"state": "pending", "verified": False, "timeout": True}
+    assert _action(fake_db).get("rollback_action_id") is None
+    assert len(_failed_rows(fake_db, rollback_id)) == 1
+    assert len(timeouts) == 1
 
 
 def test_rollback_blocked_for_protected_resource(aws, fake_db):
