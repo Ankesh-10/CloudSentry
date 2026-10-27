@@ -1,0 +1,13 @@
+{
+  "source_path": "C:/Users/Asus/Desktop/code/Project/CloudSentry/docs/superpowers/plans/2026-10-16-atomic-verify-success.md",
+  "type": "DOC",
+  "confidence": "low",
+  "manifest_override": false,
+  "title": "Atomic Verify-Success Implementation Plan",
+  "summary": "Plan to move ActionRunner's verify-success writes into one plpgsql RPC, complete_verified_action, so they commit atomically.",
+  "scope": ["ActionRunner.verify_pending", "complete_verified_action plpgsql function", "action_runner.py verify-success branch", "db/migrations/014", "audit_logs", "GitHub Actions migrations job"],
+  "cross_refs": ["backend/app/services/action_runner.py", "tests/conftest.py", "tests/test_migrations.py", "scripts/check_complete_verified_action.py", ".github/workflows/ci.yml", "backend/app/db/schema.py"],
+  "locked": false,
+  "precedence": null,
+  "notes": "Task-level implementation plan (checkbox task list, file lists, Global Constraints, Review Focus). Not an ADR/PRD/SPEC. Classifier returned UNKNOWN (low); orchestrator recorded it as DOC, matching the type shown at the discovery approval gate. Byte-identical duplicate exists under commit-plan/stages/2-verify-success/ and was excluded."
+}
