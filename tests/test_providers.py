@@ -1,6 +1,6 @@
 """GCP adapter (fake Compute client) and multi-region AWS (moto)."""
 import concurrent.futures
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import boto3
@@ -107,6 +107,175 @@ def test_gcp_requires_project(monkeypatch):
     monkeypatch.setattr(settings, "GCP_PROJECT_ID", "")
     with pytest.raises(CloudProviderError):
         GCPAdapter()
+
+
+# -- GCP telemetry (fake Cloud Monitoring client) -------------------------------------------
+
+CPU = "compute.googleapis.com/instance/cpu/utilization"
+NET_IN = "compute.googleapis.com/instance/network/received_bytes_count"
+T0 = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def _series(metric_type, zone, name, points):
+    """points: [(aligned end_time, value)]; CPU is a double, byte counts int64."""
+    is_double = metric_type == CPU
+    return SimpleNamespace(
+        metric=SimpleNamespace(type=metric_type, labels={"instance_name": name}),
+        resource=SimpleNamespace(type="gce_instance", labels={"zone": zone, "instance_id": "123"}),
+        points=[SimpleNamespace(
+            interval=SimpleNamespace(start_time=t, end_time=t),
+            value=SimpleNamespace(double_value=v if is_double else 0.0,
+                                  int64_value=0 if is_double else v))
+            for t, v in points],
+    )
+
+
+class _FakeMonitoring:
+    def __init__(self, series=(), exc=None):
+        self.series = list(series)
+        self.exc = exc
+        self.requests = []
+
+    def list_time_series(self, request):
+        self.requests.append(request)
+        if self.exc:
+            raise self.exc
+        return [s for s in self.series if f'metric.type = "{s.metric.type}"' in request["filter"]]
+
+
+def _ec2_query(qid, provider_id, metric, stat="Average", period=300):
+    return {"Id": qid, "ReturnData": True, "MetricStat": {
+        "Metric": {"Namespace": "AWS/EC2", "MetricName": metric,
+                   "Dimensions": [{"Name": "InstanceId", "Value": provider_id}]},
+        "Period": period, "Stat": stat}}
+
+
+def _gcp_with(monitoring):
+    return GCPAdapter(client=_FakeCompute(), project_id="proj", monitoring_client=monitoring)
+
+
+def test_gcp_metrics_are_translated_to_detector_names_and_units():
+    mon = _FakeMonitoring([
+        _series(CPU, "us-central1-a", "web-1", [(T0 + timedelta(minutes=5), 0.42)]),
+        _series(NET_IN, "us-central1-a", "web-1", [(T0 + timedelta(minutes=5), 12_000)]),
+        # Same name in another zone is a different VM and was not asked for.
+        _series(CPU, "europe-west1-b", "web-1", [(T0 + timedelta(minutes=5), 0.99)]),
+    ])
+    queries = [_ec2_query("q_0", "us-central1-a/web-1", "CPUUtilization"),
+               _ec2_query("q_1", "us-central1-a/web-1", "NetworkIn"),
+               _ec2_query("q_2", "us-central1-a/web-1", "NetworkOut")]
+    results = {r["Id"]: r for r in _gcp_with(mon).get_metric_data(queries, T0 - timedelta(minutes=30), T0 + timedelta(minutes=10))}
+
+    # GCP reports CPU as a 0-1 fraction; the detector thresholds are percent.
+    assert results["q_0"]["Values"] == [pytest.approx(42.0)]
+    assert results["q_1"]["Values"] == [12_000.0]
+    assert results["q_2"]["Values"] == []                     # no data is not zero usage
+    # Timestamps label the start of the period, as CloudWatch does.
+    assert results["q_0"]["Timestamps"] == [T0]
+
+    req = next(r for r in mon.requests if CPU in r["filter"])
+    assert req["name"] == "projects/proj"
+    assert 'resource.type = "gce_instance"' in req["filter"] and '"web-1"' in req["filter"]
+    assert req["aggregation"]["alignment_period"] == {"seconds": 300}
+
+
+def test_gcp_metrics_sum_byte_counts_and_average_cpu():
+    from google.cloud import monitoring_v3
+    mon = _FakeMonitoring()
+    queries = [_ec2_query("q_0", "us-central1-a/web-1", "CPUUtilization"),
+               _ec2_query("q_1", "us-central1-a/web-1", "NetworkIn")]
+    _gcp_with(mon).get_metric_data(queries, T0, T0 + timedelta(minutes=30))
+    aligners = {CPU if CPU in r["filter"] else NET_IN: r["aggregation"]["per_series_aligner"] for r in mon.requests}
+    assert aligners[CPU] == monitoring_v3.Aggregation.Aligner.ALIGN_MEAN
+    # Byte counts are per-minute deltas: their sum is the bytes moved in the period.
+    assert aligners[NET_IN] == monitoring_v3.Aggregation.Aligner.ALIGN_SUM
+
+
+def test_gcp_metrics_skip_unsupported_queries_without_calling_the_api():
+    mon = _FakeMonitoring()
+    lam = {"Id": "q_9", "MetricStat": {"Metric": {"Namespace": "AWS/Lambda", "MetricName": "Invocations",
+                                                   "Dimensions": [{"Name": "FunctionName", "Value": "f"}]},
+                                        "Period": 300, "Stat": "Sum"}}
+    bad_id = _ec2_query("q_1", "not-zone-qualified", "CPUUtilization")
+    assert _gcp_with(mon).get_metric_data([lam, bad_id], T0, T0 + timedelta(minutes=30)) == []
+    assert mon.requests == []
+
+
+def test_gcp_metrics_api_failure_raises_provider_error():
+    mon = _FakeMonitoring(exc=RuntimeError("403 permission denied"))
+    with pytest.raises(CloudProviderError):
+        _gcp_with(mon).get_metric_data([_ec2_query("q_0", "us-central1-a/web-1", "CPUUtilization")],
+                                       T0, T0 + timedelta(minutes=30))
+
+
+def test_telemetry_collects_gcp_vm_samples(fake_db, monkeypatch):
+    from backend.app.services import telemetry
+    mon = _FakeMonitoring([_series(CPU, "us-central1-a", "web-1", [(T0 + timedelta(minutes=5), 0.1)])])
+    monkeypatch.setattr(telemetry, "get_cloud_adapter", lambda region=None: _gcp_with(mon))
+    monkeypatch.setattr(telemetry, "_cw_calls_this_hour", {"hour": None, "count": 0, "metrics": 0})
+    fake_db.table("resources").insert({"id": "r1", "provider_id": "us-central1-a/web-1", "resource_type": "ec2",
+                                       "region": "us-central1", "state": "running"}).execute()
+
+    records = telemetry.TelemetryService()._collect()
+
+    assert records == [(T0, "r1", "CPUUtilization", pytest.approx(10.0), "Percent")]
+
+
+def test_gcp_metrics_answer_every_query_for_the_same_vm():
+    # Two resource rows for one VM produce two queries with one (zone, name).
+    mon = _FakeMonitoring([_series(CPU, "us-central1-a", "web-1", [(T0 + timedelta(minutes=5), 0.5)])])
+    queries = [_ec2_query("q_0", "us-central1-a/web-1", "CPUUtilization"),
+               _ec2_query("q_1", "us-central1-a/web-1", "CPUUtilization")]
+    results = {r["Id"]: r for r in _gcp_with(mon).get_metric_data(queries, T0, T0 + timedelta(minutes=30))}
+    assert results["q_0"]["Values"] == results["q_1"]["Values"] == [pytest.approx(50.0)]
+    assert len(mon.requests) == 1
+
+
+def test_gcp_metrics_missing_package_is_a_provider_error(monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+
+    def no_monitoring(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "google.cloud" and "monitoring_v3" in (fromlist or ()):
+            raise ImportError("No module named 'google.cloud.monitoring_v3'")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", no_monitoring)
+    # Even with a client injected, the request types come from the package.
+    with pytest.raises(CloudProviderError):
+        _gcp_with(_FakeMonitoring()).get_metric_data(
+            [_ec2_query("q_0", "us-central1-a/web-1", "CPUUtilization")], T0, T0 + timedelta(minutes=30))
+
+
+def test_gcp_metric_call_count_is_requests_not_cloudwatch_chunks():
+    from backend.app.adapters import gcp
+    adapter = _gcp_with(_FakeMonitoring())
+    names = [f"us-central1-a/vm-{i}" for i in range(gcp.FILTER_CHUNK + 1)]
+    queries = [_ec2_query(f"q_{m}_{i}", n, m) for m in ("CPUUtilization", "NetworkIn", "NetworkOut")
+               for i, n in enumerate(names)]
+    # 3 metrics x 2 name chunks, though CloudWatch would take them in one call.
+    assert adapter.metric_call_count(queries) == 6
+    lam = {"Id": "q_9", "MetricStat": {"Metric": {"Namespace": "AWS/Lambda", "MetricName": "Invocations",
+                                                   "Dimensions": [{"Name": "FunctionName", "Value": "f"}]},
+                                        "Period": 300, "Stat": "Sum"}}
+    assert adapter.metric_call_count([lam]) == 0
+
+
+def test_telemetry_charges_the_cap_with_gcp_request_count(fake_db, monkeypatch):
+    from backend.app.adapters import gcp
+    from backend.app.services import telemetry
+    mon = _FakeMonitoring()
+    monkeypatch.setattr(telemetry, "get_cloud_adapter", lambda region=None: _gcp_with(mon))
+    counter = {"hour": None, "count": 0, "metrics": 0}
+    monkeypatch.setattr(telemetry, "_cw_calls_this_hour", counter)
+    for i in range(gcp.FILTER_CHUNK + 1):
+        fake_db.table("resources").insert({"id": f"r{i}", "provider_id": f"us-central1-a/vm-{i}",
+                                           "resource_type": "ec2", "region": "us-central1",
+                                           "state": "running"}).execute()
+
+    telemetry.TelemetryService()._collect()
+
+    assert counter["count"] == len(mon.requests) == 6
 
 
 # -- multi-region AWS ---------------------------------------------------------------------

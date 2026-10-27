@@ -148,7 +148,7 @@ All settings are environment variables (see `.env.example` for the full, comment
 | | AWS | GCP |
 |---|---|---|
 | Discovery | EC2, Lambda, S3, RDS, EBS; all `AWS_REGIONS` | Compute instances, all zones of `GCP_PROJECT_ID` (ids are `<zone>/<name>`) |
-| Telemetry | CloudWatch, per region | **not implemented** (no metric-based detection) |
+| Telemetry | CloudWatch, per region | Cloud Monitoring, VMs only: CPU (as percent), network in/out, stored under the CloudWatch metric names so the same detection runs (needs `monitoring.timeSeries.list`; not yet tested against a live project) |
 | Actions | stop/start EC2, Lambda concurrency, tags (+ rollback) | stop/start VMs with live-state verification |
 | Tags/labels | yes | not yet |
 | Pricing | `data/pricing/aws_<region>.json`: EC2 (Linux) and RDS (MySQL Single-AZ) on-demand list prices for common families; other sizes of a listed family are derived by size, and a type missing from a regional file uses the us-east-1 price (logged as an approximation) | — |

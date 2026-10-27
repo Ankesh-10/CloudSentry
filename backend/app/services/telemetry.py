@@ -146,7 +146,10 @@ class TelemetryService:
         for region, region_resources in by_region.items():
             adapter = self._adapter_for(region)
             for (period, lookback), (queries, mapping) in build_queries(region_resources).items():
-                chunks = max(1, (len(queries) + 499) // 500)
+                # The adapter knows how many requests it batches these into.
+                chunks = adapter.metric_call_count(queries)
+                if not chunks:
+                    continue  # nothing this provider can answer
                 if not _note_cw_calls(chunks, len(queries)):
                     logger.warning("Skipping %s CloudWatch queries (period=%ss): hourly cap reached",
                                    len(queries), period)

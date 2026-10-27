@@ -37,6 +37,11 @@ class CloudAdapter(ABC):
     ) -> List[Dict[str, Any]]:
         pass
 
+    def metric_call_count(self, queries: List[Dict[str, Any]]) -> int:
+        """API requests get_metric_data will make for these queries, for the
+        telemetry call cap (pagination aside). CloudWatch takes 500 per call."""
+        return -(-len(queries) // 500)
+
     @abstractmethod
     def stop_instance(self, instance_id: str) -> bool:
         pass
